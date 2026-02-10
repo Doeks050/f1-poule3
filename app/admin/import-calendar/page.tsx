@@ -62,11 +62,26 @@ export default function ImportCalendarPage() {
       return;
     }
 
-    setMsg(`✅ Import klaar. Events nieuw: ${json.createdEvents}, sessies upsert: ${json.upsertedSessions}`);
+    setMsg(
+      `✅ Import klaar. Events nieuw: ${json.createdEvents}, sessies upsert: ${json.upsertedSessions}`
+    );
   }
 
-  if (loading) return <main style={{ padding: 16 }}><h1>Import kalender</h1><p>Loading…</p></main>;
-  if (!isAdmin) return <main style={{ padding: 16 }}><h1>Import kalender</h1><p>Niet toegestaan (geen admin).</p></main>;
+  if (loading)
+    return (
+      <main style={{ padding: 16 }}>
+        <h1>Import kalender</h1>
+        <p>Loading…</p>
+      </main>
+    );
+
+  if (!isAdmin)
+    return (
+      <main style={{ padding: 16 }}>
+        <h1>Import kalender</h1>
+        <p>Niet toegestaan (geen admin).</p>
+      </main>
+    );
 
   return (
     <main style={{ padding: 16, maxWidth: 800 }}>
@@ -81,7 +96,11 @@ export default function ImportCalendarPage() {
         Naar Admin Results
       </button>
 
-      {msg && <p style={{ marginTop: 12, color: msg.startsWith("✅") ? "green" : "crimson" }}>{msg}</p>}
+      {msg && (
+        <p style={{ marginTop: 12, color: msg.startsWith("✅") ? "green" : "crimson" }}>
+          {msg}
+        </p>
+      )}
     </main>
   );
 }
