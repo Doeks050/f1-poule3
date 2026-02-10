@@ -1,40 +1,75 @@
 "use client";
 
-import { useState } from "react";
-import { supabase } from "../../lib/supabaseClient";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { supabase } from "../../lib/supabaseClient";
 
 export default function LoginPage() {
-  const [email, setEmail] = useState("");
-  const [pw, setPw] = useState("");
-  const [msg, setMsg] = useState<string | null>(null);
   const router = useRouter();
 
-  async function signUp() {
-    setMsg(null);
-    const { error } = await supabase.auth.signUp({ email, password: pw });
-    setMsg(error ? error.message : "Account aangemaakt. Log nu in.");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
+
+  // 👉 Als user al ingelogd is: meteen naar /pools
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.auth.getUser();
+      if (data.user) {
+        router.replace("/pools");
+      }
+    })();
+  }, [router]);
+
+  async function login() {
+    setMessage(null);
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+    if (error) {
+      setMessage(error.message);
+    } else {
+      router.replace("/pools");
+    }
   }
 
-  async function signIn() {
-    setMsg(null);
-    const { error } = await supabase.auth.signInWithPassword({ email, password: pw });
-    if (error) return setMsg(error.message);
-    router.push("/pools");
+  async function signUp() {
+    setMessage(null);
+    const { error } = await supabase.auth.signUp({
+      email,
+      password,
+    });
+    if (error) {
+      setMessage(error.message);
+    } else {
+      setMessage("Account aangemaakt. Log nu in.");
+    }
   }
 
   return (
-    <main>
+    <main style={{ padding: 16 }}>
       <h1>Login</h1>
-      <div style={{ display: "grid", gap: 8, maxWidth: 380 }}>
-        <input placeholder="email" value={email} onChange={(e) => setEmail(e.target.value)} />
-        <input placeholder="password" type="password" value={pw} onChange={(e) => setPw(e.target.value)} />
-        <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={signIn}>Login</button>
-          <button onClick={signUp}>Sign up</button>
-        </div>
-        {msg && <p>{msg}</p>}
-      </div>
+
+      <input
+        placeholder="email"
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+      />
+      <br />
+
+      <input
+        type="password"
+        placeholder="password"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+      />
+      <br />
+
+      <button onClick={login}>Login</button>
+      <button onClick={signUp}>Sign up</button>
+
+      {message && <p>{message}</p>}
     </main>
   );
 }
