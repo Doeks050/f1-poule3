@@ -71,21 +71,39 @@ function detectSession(summary: string): { key: string; name: string } | null {
   return null;
 }
 
+/**
+ * Belangrijk:
+ * De F1 ICS heeft vaak emoji/icoontjes vooraan in SUMMARY (🛠 ⏱ 🏁 etc).
+ * Als we die laten staan, krijgen FP/Quali/Race verschillende "eventName" strings
+ * → dan maakt hij 3 events aan i.p.v. 1 event met 5 sessions.
+ */
+function normalizeEventName(name: string): string {
+  return name
+    // verwijder emoji/symbols, laat letters/cijfers/spaties/&/'/- staan
+    .replace(/[^\p{L}\p{N}\s&'’\-]/gu, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 function extractEventName(summary: string): string {
   let s = summary.trim();
+
   const removePhrases = [
-    "Practice 1","Practice 2","Practice 3",
-    "Free Practice 1","Free Practice 2","Free Practice 3",
+    "Practice 1", "Practice 2", "Practice 3",
+    "Free Practice 1", "Free Practice 2", "Free Practice 3",
     "Qualifying",
-    "Sprint Qualifying","Sprint Shootout","Sprint",
+    "Sprint Qualifying", "Sprint Shootout", "Sprint",
     "Race",
   ];
 
   for (const p of removePhrases) s = s.replace(new RegExp(p, "ig"), "");
+
   s = s.replace(/\s+-\s+/g, " ");
   s = s.replace(/\s+\|\s+/g, " ");
   s = s.replace(/\s{2,}/g, " ").trim();
-  return s || summary.trim();
+
+  s = normalizeEventName(s);
+  return s || normalizeEventName(summary.trim());
 }
 
 type ParsedSession = {
