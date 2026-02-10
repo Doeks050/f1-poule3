@@ -137,13 +137,17 @@ export default function PoolsPage() {
         <p>Je zit nog in geen enkele pool.</p>
       ) : (
         <ul>
-          {pools.map((p) => (
-            <li key={p.id}>
-              <strong>{p.name}</strong> <br />
-              <small>{p.id}</small>
-            </li>
-          ))}
-        </ul>
+  {pools.map((p) => (
+    <li key={p.id}>
+      <a href={`/pools/${p.id}`}>
+        <strong>{p.name}</strong>
+      </a>
+      <br />
+      <small>{p.id}</small>
+    </li>
+  ))}
+</ul>
+
       )}
 
       <button onClick={logout}>Logout</button>
