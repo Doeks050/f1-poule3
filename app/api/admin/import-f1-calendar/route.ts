@@ -2,10 +2,9 @@ import { NextResponse } from "next/server";
 import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
 import { createClient } from "@supabase/supabase-js";
 
-// Officiële F1 ICS url (die jij nu als “link” ziet)
-const F1_ICS_URL = "https://ics.ecal.com/ecal-sub/698b622912dba00002769424/Formula%201.ics";
+const F1_ICS_URL =
+  "https://ics.ecal.com/ecal-sub/698b622912dba00002769424/Formula%201.ics";
 
-// Officiële sprintweekenden 2026 (F1 bevestigd):
 // China, Miami, Canada, Great Britain, Netherlands, Singapore
 const SPRINT_WEEKEND_KEYWORDS_2026 = [
   "china",
@@ -44,16 +43,15 @@ function parseIcsDateToIso(value: string): string | null {
   const [_, yyyy, mm, dd, HH, MM, SS, z] = m;
   const sec = SS ?? "00";
 
-  if (z === "Z") {
-    return new Date(`${yyyy}-${mm}-${dd}T${HH}:${MM}:${sec}Z`).toISOString();
-  }
-  // No timezone → treat as UTC to keep consistent
-  return new Date(`${yyyy}-${mm}-${dd}T${HH}:${MM}:${sec}Z`).toISOString();
+  // Treat no timezone as UTC for consistency
+  const suffix = "Z";
+  return new Date(`${yyyy}-${mm}-${dd}T${HH}:${MM}:${sec}${suffix}`).toISOString();
 }
 
 function detectSession(summary: string): { key: string; name: string } | null {
   const s = toLowerSafe(summary);
 
+  // Sprint formats
   if (s.includes("sprint qualifying") || s.includes("sprint shootout") || s.includes("sprint quali")) {
     return { key: "sq", name: "Sprint Qualifying" };
   }
@@ -61,49 +59,60 @@ function detectSession(summary: string): { key: string; name: string } | null {
     return { key: "sprint", name: "Sprint" };
   }
 
-  if (s.includes("practice 1") || s.includes("fp1")) return { key: "fp1", name: "Free Practice 1" };
-  if (s.includes("practice 2") || s.includes("fp2")) return { key: "fp2", name: "Free Practice 2" };
-  if (s.includes("practice 3") || s.includes("fp3")) return { key: "fp3", name: "Free Practice 3" };
+  // Practice
+  if (s.includes("practice 1") || s.includes("free practice 1") || s.includes("fp1")) return { key: "fp1", name: "Free Practice 1" };
+  if (s.includes("practice 2") || s.includes("free practice 2") || s.includes("fp2")) return { key: "fp2", name: "Free Practice 2" };
+  if (s.includes("practice 3") || s.includes("free practice 3") || s.includes("fp3")) return { key: "fp3", name: "Free Practice 3" };
 
-  if (s.includes("qualifying") || s.includes("quali")) return { key: "quali", name: "Qualifying" };
+  // Quali (let op: sommige feeds gebruiken “Qualification”)
+  if (s.includes("qualifying") || s.includes("qualification") || s.includes("quali")) return { key: "quali", name: "Qualifying" };
+
+  // Race (laatste)
   if (s.includes("race")) return { key: "race", name: "Race" };
 
   return null;
 }
 
-/**
- * Belangrijk:
- * De F1 ICS heeft vaak emoji/icoontjes vooraan in SUMMARY (🛠 ⏱ 🏁 etc).
- * Als we die laten staan, krijgen FP/Quali/Race verschillende "eventName" strings
- * → dan maakt hij 3 events aan i.p.v. 1 event met 5 sessions.
- */
-function normalizeEventName(name: string): string {
-  return name
-    // verwijder emoji/symbols, laat letters/cijfers/spaties/&/'/- staan
-    .replace(/[^\p{L}\p{N}\s&'’\-]/gu, "")
-    .replace(/\s{2,}/g, " ")
-    .trim();
+// verwijder emoji/specials aan begin/eind zodat “🏁 FORMULA 1 …” niet als andere string telt
+function stripLeadingEmojiAndSpaces(s: string): string {
+  // verwijder niet-letter/nummer tekens aan begin (emoji, pictos)
+  return s.replace(/^[^\p{L}\p{N}]+/gu, "").trim();
 }
 
-function extractEventName(summary: string): string {
-  let s = summary.trim();
+function normalizeEventName(raw: string): string {
+  let s = stripLeadingEmojiAndSpaces(raw.trim());
 
+  // sommige feeds hebben “ - ” of “ | ” scheiding
+  // liever alles vóór de sessie-naam overhouden
+  s = s.replace(/\s+\|\s+/g, " ");
+  s = s.replace(/\s+-\s+/g, " ");
+
+  // Zéér belangrijk: verwijder alle sessie-termen (ook varianten)
   const removePhrases = [
+    // Practice
     "Practice 1", "Practice 2", "Practice 3",
     "Free Practice 1", "Free Practice 2", "Free Practice 3",
-    "Qualifying",
-    "Sprint Qualifying", "Sprint Shootout", "Sprint",
+    "FP1", "FP2", "FP3",
+
+    // Quali varianten
+    "Qualifying", "Qualification", "Quali",
+
+    // Sprint varianten
+    "Sprint Qualifying", "Sprint Shootout", "Sprint Quali",
+    "Sprint Race", "Sprint",
+
+    // Race
     "Race",
   ];
 
-  for (const p of removePhrases) s = s.replace(new RegExp(p, "ig"), "");
+  for (const p of removePhrases) {
+    s = s.replace(new RegExp(`\\b${p}\\b`, "ig"), "");
+  }
 
-  s = s.replace(/\s+-\s+/g, " ");
-  s = s.replace(/\s+\|\s+/g, " ");
+  // extra cleanup
   s = s.replace(/\s{2,}/g, " ").trim();
 
-  s = normalizeEventName(s);
-  return s || normalizeEventName(summary.trim());
+  return s || raw.trim();
 }
 
 type ParsedSession = {
@@ -116,20 +125,29 @@ type ParsedSession = {
 function parseIcs(text: string): ParsedSession[] {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
 
-  // Unfold ICS lines
+  // Unfold ICS lines (regels die beginnen met spatie horen bij vorige regel)
   const unfolded: string[] = [];
   for (const line of lines) {
     if (line.startsWith(" ") && unfolded.length > 0) unfolded[unfolded.length - 1] += line.slice(1);
     else unfolded.push(line);
   }
 
-  const events: { dtstart?: string; summary?: string }[] = [];
+  const vevents: { dtstart?: string; summary?: string }[] = [];
   let inEvent = false;
   let cur: any = {};
 
   for (const line of unfolded) {
-    if (line.startsWith("BEGIN:VEVENT")) { inEvent = true; cur = {}; continue; }
-    if (line.startsWith("END:VEVENT")) { inEvent = false; events.push(cur); cur = {}; continue; }
+    if (line.startsWith("BEGIN:VEVENT")) {
+      inEvent = true;
+      cur = {};
+      continue;
+    }
+    if (line.startsWith("END:VEVENT")) {
+      inEvent = false;
+      vevents.push(cur);
+      cur = {};
+      continue;
+    }
     if (!inEvent) continue;
 
     if (line.startsWith("DTSTART")) {
@@ -143,19 +161,19 @@ function parseIcs(text: string): ParsedSession[] {
   }
 
   const out: ParsedSession[] = [];
-  for (const e of events) {
+
+  for (const e of vevents) {
     if (!e.dtstart || !e.summary) continue;
 
     const iso = parseIcsDateToIso(e.dtstart);
     if (!iso) continue;
 
-    // Alleen seizoen 2026
     if (new Date(iso).getUTCFullYear() !== 2026) continue;
 
     const sess = detectSession(e.summary);
     if (!sess) continue;
 
-    const eventName = extractEventName(e.summary);
+    const eventName = normalizeEventName(e.summary);
 
     out.push({
       eventName,
@@ -165,7 +183,7 @@ function parseIcs(text: string): ParsedSession[] {
     });
   }
 
-  // Dedupe eventName+sessionKey keep earliest
+  // dedupe per eventName+sessionKey (keep earliest)
   const map = new Map<string, ParsedSession>();
   for (const p of out) {
     const k = `${p.eventName}__${p.sessionKey}`;
@@ -177,10 +195,11 @@ function parseIcs(text: string): ParsedSession[] {
 }
 
 async function isCallerAdmin(accessToken: string): Promise<{ ok: boolean; userId?: string; error?: string }> {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-  // Verify token and get user id
+  if (!url || !anon) return { ok: false, error: "Missing env NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY" };
+
   const supa = createClient(url, anon, { auth: { persistSession: false } });
   const { data: userData, error: userErr } = await supa.auth.getUser(accessToken);
   if (userErr || !userData.user) return { ok: false, error: "Not logged in / invalid token" };
@@ -226,7 +245,7 @@ export async function POST(req: Request) {
 
     const admin = supabaseAdmin();
 
-    // group by event
+    // group sessions by normalized event name
     const byEvent = new Map<string, ParsedSession[]>();
     for (const p of parsed) byEvent.set(p.eventName, [...(byEvent.get(p.eventName) ?? []), p]);
 
@@ -235,7 +254,7 @@ export async function POST(req: Request) {
 
     for (const [eventName, sessions] of byEvent.entries()) {
       // weekend starts_at = earliest session start
-      const weekendStart = sessions.map(s => s.startsAtIso).sort()[0];
+      const weekendStart = sessions.map((s) => s.startsAtIso).sort()[0];
       const format = isSprintWeekend(eventName) ? "sprint" : "standard";
 
       // find event by name+starts_at
