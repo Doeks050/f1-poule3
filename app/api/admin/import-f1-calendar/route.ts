@@ -3,7 +3,7 @@ import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
 import { createClient } from "@supabase/supabase-js";
 
 // Officiële F1 ICS url (die jij nu als “link” ziet)
-const F1_ICS_URL = "https://calendar.formula1.com/formula1.ics";
+const F1_ICS_URL = "https://ics.ecal.com/ecal-sub/698b622912dba00002769424/Formula%201.ics";
 
 // Officiële sprintweekenden 2026 (F1 bevestigd):
 // China, Miami, Canada, Great Britain, Netherlands, Singapore
