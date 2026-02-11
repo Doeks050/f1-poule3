@@ -17,7 +17,9 @@ type SessionRow = {
 type PredictionRow = {
   id: string;
   pool_id: string;
-  session_id: string;
+  // kan session_id OF event_session_id zijn, afhankelijk van jouw schema
+  session_id?: string;
+  event_session_id?: string;
   user_id: string;
   picks: any; // jsonb
   created_at?: string;
@@ -73,7 +75,6 @@ function readTop10FromPicks(picks: any): string[] | null {
   if (Array.isArray(picks?.top10) && picks.top10.length === 10) {
     return picks.top10.map((x: any) => (typeof x === "string" ? x : ""));
   }
-  // backward compatibility (als je ooit positions gebruikte)
   if (picks?.positions) {
     const arr: string[] = [];
     for (let i = 1; i <= 10; i++) {
@@ -83,6 +84,71 @@ function readTop10FromPicks(picks: any): string[] | null {
     if (arr.length === 10) return arr;
   }
   return null;
+}
+
+// ---- helpers om te werken met predictions kolomnaam verschillen ----
+type PredCol = "event_session_id" | "session_id";
+
+/**
+ * Probeert een query met kolom `event_session_id`, en valt terug naar `session_id`
+ * als die kolom niet bestaat in jouw schema.
+ */
+async function findPredictionFlexible(args: {
+  poolId: string;
+  sessionId: string;
+  userId: string;
+}): Promise<{ pred: PredictionRow | null; col: PredCol; error?: string }> {
+  // 1) probeer event_session_id
+  {
+    const { data, error } = await supabase
+      .from("predictions")
+      .select("id,pool_id,event_session_id,user_id,picks,created_at,updated_at")
+      .eq("pool_id", args.poolId)
+      .eq("event_session_id", args.sessionId)
+      .eq("user_id", args.userId)
+      .maybeSingle();
+
+    if (!error) {
+      return { pred: (data as any) ?? null, col: "event_session_id" };
+    }
+
+    // alleen fallbacken als het echt een "column does not exist" is
+    if (!String(error.message).toLowerCase().includes("does not exist")) {
+      return { pred: null, col: "event_session_id", error: error.message };
+    }
+  }
+
+  // 2) fallback: session_id
+  {
+    const { data, error } = await supabase
+      .from("predictions")
+      .select("id,pool_id,session_id,user_id,picks,created_at,updated_at")
+      .eq("pool_id", args.poolId)
+      .eq("session_id", args.sessionId)
+      .eq("user_id", args.userId)
+      .maybeSingle();
+
+    if (error) return { pred: null, col: "session_id", error: error.message };
+    return { pred: (data as any) ?? null, col: "session_id" };
+  }
+}
+
+async function insertPredictionFlexible(args: {
+  poolId: string;
+  sessionId: string;
+  userId: string;
+  picks: any;
+  col: PredCol;
+}) {
+  // insert met de kolom die we eerder hebben gedetecteerd
+  const row: any = {
+    pool_id: args.poolId,
+    user_id: args.userId,
+    picks: args.picks,
+  };
+  row[args.col] = args.sessionId;
+
+  return supabase.from("predictions").insert(row);
 }
 
 export default function SessionPredictionsPage({
@@ -109,6 +175,9 @@ export default function SessionPredictionsPage({
   const [top10, setTop10] = useState<string[]>(defaultTop10());
   const [saving, setSaving] = useState(false);
 
+  // we onthouden welke predictions-kolom jouw DB gebruikt
+  const [predSessionCol, setPredSessionCol] = useState<PredCol>("event_session_id");
+
   // live clock for lock countdown
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -131,9 +200,10 @@ export default function SessionPredictionsPage({
     return lockMs - now;
   }, [lockMs, now]);
 
+  // ✅ jouw route is /event/[eventId] (niet /weekends)
   const backToWeekendHref = useMemo(() => {
     if (!eventIdFromQuery) return `/pools/${poolId}`;
-    return `/pools/${poolId}/weekends/${eventIdFromQuery}`;
+    return `/pools/${poolId}/event/${eventIdFromQuery}`;
   }, [poolId, eventIdFromQuery]);
 
   useEffect(() => {
@@ -163,24 +233,23 @@ export default function SessionPredictionsPage({
       }
       setSessionRow(sess as SessionRow);
 
-      // laad bestaande prediction (als die bestaat)
-      // We doen dit expres “robust” zonder unieke constraint te vereisen:
-      const { data: pred, error: predErr } = await supabase
-        .from("predictions")
-        .select("id,pool_id,session_id,user_id,picks,created_at,updated_at")
-        .eq("pool_id", poolId)
-        .eq("session_id", sessionId)
-        .eq("user_id", u.user.id)
-        .maybeSingle();
+      // laad bestaande prediction (flexibel op kolomnaam)
+      const found = await findPredictionFlexible({
+        poolId,
+        sessionId,
+        userId: u.user.id,
+      });
 
-      if (predErr) {
-        setMsg(predErr.message);
+      if (found.error) {
+        setMsg(found.error);
         setLoading(false);
         return;
       }
 
-      if (pred) {
-        const loaded = readTop10FromPicks((pred as PredictionRow).picks);
+      setPredSessionCol(found.col);
+
+      if (found.pred) {
+        const loaded = readTop10FromPicks(found.pred.picks);
         if (loaded) setTop10(loaded.map((x) => normalizeCode(x)));
       }
 
@@ -203,11 +272,9 @@ export default function SessionPredictionsPage({
 
   function validateTop10(arr: string[]) {
     const cleaned = arr.map((x) => normalizeCode(x)).map((x) => x.replace(/\s+/g, ""));
-    // leeg mag (voor vroeg invullen), maar geen duplicates in niet-lege entries:
     const nonEmpty = cleaned.filter((x) => x.length > 0);
     const set = new Set(nonEmpty);
     if (set.size !== nonEmpty.length) return "Dubbele driver codes gevonden. Elke positie moet uniek zijn.";
-    // optioneel: length check (3 letters). Niet hard blokkeren, alleen waarschuwing.
     return null;
   }
 
@@ -237,31 +304,32 @@ export default function SessionPredictionsPage({
 
     setSaving(true);
 
-    // Check of er al een prediction row bestaat
-    const { data: existing, error: findErr } = await supabase
-      .from("predictions")
-      .select("id")
-      .eq("pool_id", poolId)
-      .eq("session_id", sessionId)
-      .eq("user_id", userId)
-      .maybeSingle();
-
-    if (findErr) {
-      setSaving(false);
-      setMsg(findErr.message);
-      return;
-    }
-
     const payload = {
       version: 1,
       top10: top10.map((x) => normalizeCode(x)),
     };
 
-    if (existing?.id) {
+    // check bestaande prediction (flexibel)
+    const found = await findPredictionFlexible({
+      poolId,
+      sessionId,
+      userId,
+    });
+
+    if (found.error) {
+      setSaving(false);
+      setMsg(found.error);
+      return;
+    }
+
+    // onthoud kolom
+    setPredSessionCol(found.col);
+
+    if (found.pred?.id) {
       const { error: updErr } = await supabase
         .from("predictions")
         .update({ picks: payload })
-        .eq("id", existing.id);
+        .eq("id", found.pred.id);
 
       setSaving(false);
 
@@ -271,23 +339,24 @@ export default function SessionPredictionsPage({
       }
       setMsg("✅ Opgeslagen.");
       return;
-    } else {
-      const { error: insErr } = await supabase.from("predictions").insert({
-        pool_id: poolId,
-        session_id: sessionId,
-        user_id: userId,
-        picks: payload,
-      });
+    }
 
-      setSaving(false);
+    // insert
+    const { error: insErr } = await insertPredictionFlexible({
+      poolId,
+      sessionId,
+      userId,
+      picks: payload,
+      col: found.col ?? predSessionCol,
+    });
 
-      if (insErr) {
-        setMsg(insErr.message);
-        return;
-      }
-      setMsg("✅ Opgeslagen.");
+    setSaving(false);
+
+    if (insErr) {
+      setMsg(insErr.message);
       return;
     }
+    setMsg("✅ Opgeslagen.");
   }
 
   if (loading) {
@@ -325,11 +394,12 @@ export default function SessionPredictionsPage({
           <div style={{ marginTop: 6, opacity: 0.85 }}>
             <div>
               <strong>Start:</strong> {sessionRow ? fmtLocal(sessionRow.starts_at) : "-"}{" "}
-              {sessionRow ? (
-                <span style={{ opacity: 0.7 }}>({sessionRow.session_key})</span>
-              ) : null}
+              {sessionRow ? <span style={{ opacity: 0.7 }}>({sessionRow.session_key})</span> : null}
             </div>
             {lockInfo ? <div style={{ marginTop: 4 }}>{lockInfo}</div> : null}
+            <div style={{ marginTop: 6, fontSize: 12, opacity: 0.7 }}>
+              Predictions-kolom: <code>{predSessionCol}</code>
+            </div>
           </div>
         </div>
 
@@ -347,8 +417,8 @@ export default function SessionPredictionsPage({
 
       <h2 style={{ marginTop: 0 }}>Voorspelling Top 10</h2>
       <p style={{ marginTop: 6, opacity: 0.8 }}>
-        Vul driver codes in (bijv. <strong>VER</strong>, <strong>HAM</strong>, <strong>ALO</strong>).  
-        Elke positie moet uniek zijn.
+        Vul driver codes in (bijv. <strong>VER</strong>, <strong>HAM</strong>, <strong>ALO</strong>). Elke positie moet
+        uniek zijn.
       </p>
 
       <div style={{ display: "grid", gap: 8, maxWidth: 520 }}>
@@ -392,18 +462,14 @@ export default function SessionPredictionsPage({
         </button>
       </div>
 
-      {msg ? (
-        <p style={{ marginTop: 12, color: msg.startsWith("✅") ? "green" : "crimson" }}>{msg}</p>
-      ) : null}
+      {msg ? <p style={{ marginTop: 12, color: msg.startsWith("✅") ? "green" : "crimson" }}>{msg}</p> : null}
 
       {isLocked ? (
         <p style={{ marginTop: 12, opacity: 0.75 }}>
           Deze sessie is gelockt. Je kunt je voorspelling nog wel bekijken, maar niet wijzigen.
         </p>
       ) : (
-        <p style={{ marginTop: 12, opacity: 0.75 }}>
-          Tip: je kunt later terugkomen en aanpassen tot de lock-tijd.
-        </p>
+        <p style={{ marginTop: 12, opacity: 0.75 }}>Tip: je kunt later terugkomen en aanpassen tot de lock-tijd.</p>
       )}
     </main>
   );
