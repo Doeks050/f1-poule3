@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "../../../../../lib/supabaseClient";
+import { F1_DRIVERS_2026, getTeamColorByDriverCode } from "../../../../../lib/f1_2026";
 
 type SessionRow = {
   id: string;
@@ -17,8 +18,7 @@ type SessionRow = {
 type PredictionRow = {
   id: string;
   pool_id: string;
-  event_id: string | null;
-  event_session_id: string;
+  event_id: string;
   user_id: string;
   prediction_json: any; // jsonb
   created_at?: string;
@@ -54,27 +54,56 @@ function fmtCountdown(ms: number) {
   return days > 0 ? `${days}d ${hh}:${mm}:${ss}` : `${hh}:${mm}:${ss}`;
 }
 
-function normalizeCode(v: string) {
-  return v.trim().toUpperCase();
-}
-
 function defaultTop10() {
   return Array.from({ length: 10 }, () => "");
 }
 
+function normalizeCode(v: string) {
+  return (v ?? "").trim().toUpperCase();
+}
+
+function validateTop10(arr: string[]) {
+  const cleaned = arr.map((x) => normalizeCode(x)).map((x) => x.replace(/\s+/g, ""));
+  const nonEmpty = cleaned.filter((x) => x.length > 0);
+  const set = new Set(nonEmpty);
+  if (set.size !== nonEmpty.length) return "Dubbele driver codes gevonden. Elke positie moet uniek zijn.";
+  return null;
+}
+
 /**
- * We bewaren in predictions.prediction_json dit formaat:
+ * prediction_json format:
  * {
  *   version: 1,
- *   top10: ["VER","HAM","ALO",...]
+ *   sessions: {
+ *     fp1: { top10: ["VER", ...] },
+ *     quali: { top10: [...] },
+ *     race: { top10: [...] }
+ *   }
  * }
  */
-function readTop10FromJson(prediction_json: any): string[] | null {
-  if (!prediction_json) return null;
-  if (Array.isArray(prediction_json?.top10) && prediction_json.top10.length === 10) {
-    return prediction_json.top10.map((x: any) => (typeof x === "string" ? x : ""));
+function readSessionTop10FromJson(predictionJson: any, sessionKey: string): string[] | null {
+  const top10 = predictionJson?.sessions?.[sessionKey]?.top10;
+  if (Array.isArray(top10) && top10.length === 10) {
+    return top10.map((x: any) => (typeof x === "string" ? x : ""));
   }
   return null;
+}
+
+function writeSessionTop10ToJson(predictionJson: any, sessionKey: string, top10: string[]) {
+  const base = predictionJson && typeof predictionJson === "object" ? predictionJson : {};
+  const version = base.version ?? 1;
+  const sessions = base.sessions && typeof base.sessions === "object" ? base.sessions : {};
+  return {
+    ...base,
+    version,
+    sessions: {
+      ...sessions,
+      [sessionKey]: {
+        ...(sessions?.[sessionKey] ?? {}),
+        top10,
+      },
+    },
+  };
 }
 
 export default function SessionPredictionsPage({
@@ -88,7 +117,7 @@ export default function SessionPredictionsPage({
   const poolId = params.id;
   const sessionId = params.sessionId;
 
-  // eventId wordt gebruikt voor "terug naar weekend"
+  // eventId zit in query (om terug te linken naar weekend page)
   const eventIdFromQuery = searchParams.get("eventId");
 
   const [loading, setLoading] = useState(true);
@@ -124,7 +153,7 @@ export default function SessionPredictionsPage({
 
   const backToWeekendHref = useMemo(() => {
     if (!eventIdFromQuery) return `/pools/${poolId}`;
-    // jouw weekend route is /pools/[id]/event/[eventId]
+    // ✅ route is /event/[eventId]
     return `/pools/${poolId}/event/${eventIdFromQuery}`;
   }, [poolId, eventIdFromQuery]);
 
@@ -153,14 +182,16 @@ export default function SessionPredictionsPage({
         setLoading(false);
         return;
       }
-      setSessionRow(sess as SessionRow);
 
-      // laad bestaande prediction (per pool + session + user)
+      const sr = sess as SessionRow;
+      setSessionRow(sr);
+
+      // ✅ prediction row is per (pool_id, event_id, user_id)
       const { data: pred, error: predErr } = await supabase
         .from("predictions")
-        .select("id,pool_id,event_id,event_session_id,user_id,prediction_json,created_at,updated_at")
+        .select("id,pool_id,event_id,user_id,prediction_json,created_at,updated_at")
         .eq("pool_id", poolId)
-        .eq("event_session_id", sessionId)
+        .eq("event_id", sr.event_id)
         .eq("user_id", u.user.id)
         .maybeSingle();
 
@@ -171,7 +202,7 @@ export default function SessionPredictionsPage({
       }
 
       if (pred) {
-        const loaded = readTop10FromJson((pred as PredictionRow).prediction_json);
+        const loaded = readSessionTop10FromJson((pred as PredictionRow).prediction_json, sr.session_key);
         if (loaded) setTop10(loaded.map((x) => normalizeCode(x)));
       }
 
@@ -179,10 +210,10 @@ export default function SessionPredictionsPage({
     })();
   }, [router, poolId, sessionId]);
 
-  function updatePos(idx: number, value: string) {
+  function updatePos(idx: number, code: string) {
     setTop10((prev) => {
       const next = [...prev];
-      next[idx] = normalizeCode(value);
+      next[idx] = normalizeCode(code);
       return next;
     });
   }
@@ -192,47 +223,79 @@ export default function SessionPredictionsPage({
     setMsg(null);
   }
 
-  function validateTop10(arr: string[]) {
-    const cleaned = arr.map((x) => normalizeCode(x)).map((x) => x.replace(/\s+/g, ""));
-    const nonEmpty = cleaned.filter((x) => x.length > 0);
-    const set = new Set(nonEmpty);
-    if (set.size !== nonEmpty.length) return "Dubbele driver codes gevonden. Elke positie moet uniek zijn.";
-    return null;
-  }
-
   async function save() {
     setMsg(null);
 
-    if (!userId) return setMsg("Geen user. Log opnieuw in.");
-    if (!sessionRow) return setMsg("Geen session data geladen.");
-    if (isLocked) return setMsg("Deze sessie is gelockt. Je kunt niet meer opslaan.");
+    if (!userId) {
+      setMsg("Geen user. Log opnieuw in.");
+      return;
+    }
+    if (!sessionRow) {
+      setMsg("Geen session data geladen.");
+      return;
+    }
+    if (isLocked) {
+      setMsg("Deze sessie is gelockt. Je kunt niet meer opslaan.");
+      return;
+    }
 
     const warn = validateTop10(top10);
-    if (warn) return setMsg(warn);
+    if (warn) {
+      setMsg(warn);
+      return;
+    }
 
     setSaving(true);
 
-    const payload = {
-      version: 1,
-      top10: top10.map((x) => normalizeCode(x)),
-    };
+    // Find existing row for this weekend
+    const { data: existing, error: findErr } = await supabase
+      .from("predictions")
+      .select("id,prediction_json")
+      .eq("pool_id", poolId)
+      .eq("event_id", sessionRow.event_id)
+      .eq("user_id", userId)
+      .maybeSingle();
 
-    // Upsert op (user_id, pool_id, event_session_id) — werkt pas goed na de unique index in SQL
-    const { error: upErr } = await supabase.from("predictions").upsert(
-      {
-        user_id: userId,
+    if (findErr) {
+      setSaving(false);
+      setMsg(findErr.message);
+      return;
+    }
+
+    const cleanedTop10 = top10.map((x) => normalizeCode(x));
+    const nextJson = writeSessionTop10ToJson(existing?.prediction_json, sessionRow.session_key, cleanedTop10);
+
+    if (existing?.id) {
+      const { error: updErr } = await supabase
+        .from("predictions")
+        .update({ prediction_json: nextJson })
+        .eq("id", existing.id);
+
+      setSaving(false);
+
+      if (updErr) {
+        setMsg(updErr.message);
+        return;
+      }
+      setMsg("✅ Opgeslagen.");
+      return;
+    } else {
+      const { error: insErr } = await supabase.from("predictions").insert({
         pool_id: poolId,
-        event_id: sessionRow.event_id, // handig voor queries later
-        event_session_id: sessionId,
-        prediction_json: payload,
-      },
-      { onConflict: "user_id,pool_id,event_session_id" }
-    );
+        event_id: sessionRow.event_id,
+        user_id: userId,
+        prediction_json: nextJson,
+      });
 
-    setSaving(false);
+      setSaving(false);
 
-    if (upErr) return setMsg(upErr.message);
-    setMsg("✅ Opgeslagen.");
+      if (insErr) {
+        setMsg(insErr.message);
+        return;
+      }
+      setMsg("✅ Opgeslagen.");
+      return;
+    }
   }
 
   if (loading) {
@@ -290,35 +353,53 @@ export default function SessionPredictionsPage({
 
       <h2 style={{ marginTop: 0 }}>Voorspelling Top 10</h2>
       <p style={{ marginTop: 6, opacity: 0.8 }}>
-        (Voor nu) driver codes invullen. Straks vervangen we dit door dropdowns met teamkleur/logo.
+        Kies per positie een coureur. Elke positie moet uniek zijn.
       </p>
 
-      <div style={{ display: "grid", gap: 8, maxWidth: 520 }}>
+      <div style={{ display: "grid", gap: 8, maxWidth: 720 }}>
         {top10.map((v, idx) => {
           const pos = idx + 1;
+          const color = v ? getTeamColorByDriverCode(v) : "#999";
           return (
             <div
               key={idx}
               style={{
                 display: "grid",
-                gridTemplateColumns: "52px 1fr",
+                gridTemplateColumns: "52px 16px 1fr",
                 gap: 10,
                 alignItems: "center",
               }}
             >
               <div style={{ fontWeight: 700 }}>P{pos}</div>
-              <input
+
+              <div
+                title={v ? `Teamkleur (${v})` : "Teamkleur"}
+                style={{
+                  width: 14,
+                  height: 14,
+                  borderRadius: 4,
+                  background: color,
+                  border: "1px solid rgba(0,0,0,0.2)",
+                }}
+              />
+
+              <select
                 value={v}
                 onChange={(e) => updatePos(idx, e.target.value)}
                 disabled={isLocked}
-                placeholder="bv. VER"
                 style={{
                   padding: "8px 10px",
                   border: "1px solid #ccc",
                   borderRadius: 8,
-                  textTransform: "uppercase",
                 }}
-              />
+              >
+                <option value="">— kies driver —</option>
+                {F1_DRIVERS_2026.map((d) => (
+                  <option key={d.code} value={d.code}>
+                    {d.code} — {d.name} ({d.teamName})
+                  </option>
+                ))}
+              </select>
             </div>
           );
         })}
@@ -343,9 +424,7 @@ export default function SessionPredictionsPage({
           Deze sessie is gelockt. Je kunt je voorspelling nog wel bekijken, maar niet wijzigen.
         </p>
       ) : (
-        <p style={{ marginTop: 12, opacity: 0.75 }}>
-          Tip: je kunt later terugkomen en aanpassen tot de lock-tijd.
-        </p>
+        <p style={{ marginTop: 12, opacity: 0.75 }}>Tip: je kunt later terugkomen en aanpassen tot de lock-tijd.</p>
       )}
     </main>
   );
