@@ -21,6 +21,16 @@ type SessionRow = {
   lock_at: string; // ISO
 };
 
+type PredictionRow = {
+  id: string;
+  user_id: string;
+  pool_id: string;
+  event_id: string;
+  prediction_json: any; // jsonb
+  created_at?: string;
+  updated_at?: string;
+};
+
 function msToParts(ms: number) {
   const totalSec = Math.max(0, Math.floor(ms / 1000));
   const days = Math.floor(totalSec / 86400);
@@ -56,6 +66,22 @@ function formatLabel(format: string | null) {
   return "Weekend";
 }
 
+// prediction_json.sessions[sessionId] => { version: 1, top10: [...] }
+function getSessionTop10FromPrediction(predictionJson: any, sessionId: string): string[] | null {
+  const sessions = predictionJson?.sessions;
+  const entry = sessions?.[sessionId];
+  const top10 = entry?.top10;
+  if (Array.isArray(top10) && top10.length === 10) {
+    return top10.map((x: any) => (typeof x === "string" ? x : ""));
+  }
+  return null;
+}
+
+function countFilled(arr: string[] | null): number {
+  if (!arr) return 0;
+  return arr.filter((x) => String(x ?? "").trim().length > 0).length;
+}
+
 export default function WeekendOverviewPage({
   params,
 }: {
@@ -72,6 +98,12 @@ export default function WeekendOverviewPage({
   const [eventRow, setEventRow] = useState<EventRow | null>(null);
   const [sessions, setSessions] = useState<SessionRow[]>([]);
 
+  // auth user
+  const [userId, setUserId] = useState<string | null>(null);
+
+  // prediction row for this user/pool/event
+  const [prediction, setPrediction] = useState<PredictionRow | null>(null);
+
   // live clock for countdowns
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -84,11 +116,17 @@ export default function WeekendOverviewPage({
       setLoading(true);
       setMsg(null);
 
-      const { data: userData } = await supabase.auth.getUser();
+      const { data: userData, error: userErr } = await supabase.auth.getUser();
+      if (userErr) {
+        setMsg(userErr.message);
+        setLoading(false);
+        return;
+      }
       if (!userData.user) {
         router.replace("/login");
         return;
       }
+      setUserId(userData.user.id);
 
       // pool name (nice-to-have)
       const { data: pool, error: poolErr } = await supabase
@@ -111,10 +149,9 @@ export default function WeekendOverviewPage({
         setLoading(false);
         return;
       }
-
       setEventRow(ev as EventRow);
 
-      // sessions for event (sorted)
+      // sessions
       const { data: sess, error: sessErr } = await supabase
         .from("event_sessions")
         .select("id,event_id,session_key,name,starts_at,lock_at")
@@ -126,20 +163,46 @@ export default function WeekendOverviewPage({
         setLoading(false);
         return;
       }
-
       setSessions((sess ?? []) as SessionRow[]);
+
+      // prediction row for this event/pool/user (event-based schema)
+      const { data: pred, error: predErr } = await supabase
+        .from("predictions")
+        .select("id,user_id,pool_id,event_id,prediction_json,created_at,updated_at")
+        .eq("pool_id", poolId)
+        .eq("event_id", eventId)
+        .eq("user_id", userData.user.id)
+        .maybeSingle();
+
+      if (predErr) {
+        // Niet hard falen; weekend moet nog steeds renderen
+        setPrediction(null);
+      } else {
+        setPrediction((pred ?? null) as PredictionRow | null);
+      }
+
       setLoading(false);
     })();
   }, [router, poolId, eventId]);
 
   const nextOpenSessionId = useMemo(() => {
-    // first session that is not locked yet
     for (const s of sessions) {
       const lockMs = new Date(s.lock_at).getTime();
       if (now < lockMs) return s.id;
     }
     return null;
   }, [sessions, now]);
+
+  // Build a quick lookup: sessionId -> filled count
+  const predictedBySession = useMemo(() => {
+    const map: Record<string, { filled: number; hasAny: boolean }> = {};
+    for (const s of sessions) {
+      const top10 = getSessionTop10FromPrediction(prediction?.prediction_json, s.id);
+      const filled = countFilled(top10);
+      map[s.id] = { filled, hasAny: filled > 0 };
+    }
+    return map;
+  }, [sessions, prediction]);
 
   if (loading) {
     return (
@@ -220,6 +283,10 @@ export default function WeekendOverviewPage({
 
             const href = `/pools/${poolId}/sessions/${s.id}?eventId=${eventId}`;
 
+            const predInfo = predictedBySession[s.id];
+            const predictedLabel =
+              predInfo?.hasAny ? `✅ Voorspeld (${predInfo.filled}/10)` : "—";
+
             return (
               <div
                 key={s.id}
@@ -245,18 +312,22 @@ export default function WeekendOverviewPage({
                         ({s.session_key})
                       </span>
                     </div>
+
                     <div style={{ marginTop: 6, opacity: 0.85 }}>
                       {status} • {countdown}
                     </div>
-                    <div style={{ marginTop: 4, opacity: 0.85 }}>
-                      {startLine}
+
+                    <div style={{ marginTop: 4, opacity: 0.85 }}>{startLine}</div>
+
+                    <div style={{ marginTop: 6, fontSize: 13, opacity: 0.9 }}>
+                      <strong>Jouw voorspelling:</strong>{" "}
+                      <span style={{ color: predInfo?.hasAny ? "green" : "#666" }}>
+                        {predictedLabel}
+                      </span>
                     </div>
 
-                    {/* Extra sanity check: als start in verleden ligt */}
                     {now > startMs ? (
-                      <div style={{ marginTop: 4, opacity: 0.7 }}>
-                        (Sessie is gestart/voorbij)
-                      </div>
+                      <div style={{ marginTop: 4, opacity: 0.7 }}>(Sessie is gestart/voorbij)</div>
                     ) : null}
                   </div>
 
@@ -268,7 +339,7 @@ export default function WeekendOverviewPage({
                       onClick={() => router.push(href)}
                       style={{ padding: "6px 10px" }}
                     >
-                      {isLocked ? "Bekijk" : "Voorspel"}
+                      {isLocked ? "Bekijk" : predInfo?.hasAny ? "Aanpassen" : "Voorspel"}
                     </button>
                   </div>
                 </div>
@@ -279,8 +350,17 @@ export default function WeekendOverviewPage({
       )}
 
       <p style={{ marginTop: 18, opacity: 0.7 }}>
-        Lock-regel: sessies sluiten automatisch <strong>5 minuten</strong> voor start
-        (op basis van <code>lock_at</code>).
+        Lock-regel: sessies sluiten automatisch <strong>5 minuten</strong> voor start (op basis van{" "}
+        <code>lock_at</code>).
+      </p>
+
+      <p style={{ marginTop: 8, opacity: 0.7 }}>
+        {userId ? (
+          <>
+            (Debug: user geladen) •{" "}
+            {prediction?.id ? "prediction row bestaat" : "nog geen prediction row voor dit event"}
+          </>
+        ) : null}
       </p>
     </main>
   );
