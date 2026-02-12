@@ -4,7 +4,11 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "../../../../../lib/supabaseClient";
-import { F1_DRIVERS_2026, getTeamColorByDriverCode } from "../../../../../lib/f1_2026";
+import {
+  F1_DRIVERS_2026,
+  getDriversByTeam,
+  getTeamColorByDriverCode,
+} from "../../../../../lib/f1_2026";
 
 type SessionRow = {
   id: string;
@@ -63,14 +67,11 @@ function defaultTop10() {
 }
 
 /**
- * prediction_json formaat (per sessie) in predictions:
+ * prediction_json:
  * {
  *   version: 1,
  *   sessions: {
- *     [sessionId]: {
- *       session_key: "fp1" | "fp2" | ...,
- *       top10: ["VER","HAM",...]
- *     }
+ *     [sessionId]: { session_key: "...", top10: [...] }
  *   }
  * }
  */
@@ -83,7 +84,12 @@ function readTop10FromPrediction(prediction_json: any, sessionId: string): strin
   return null;
 }
 
-function upsertSessionTop10(prediction_json: any, sessionId: string, session_key: string, top10: string[]) {
+function upsertSessionTop10(
+  prediction_json: any,
+  sessionId: string,
+  session_key: string,
+  top10: string[]
+) {
   const base = prediction_json && typeof prediction_json === "object" ? prediction_json : {};
   const sessions = base.sessions && typeof base.sessions === "object" ? base.sessions : {};
 
@@ -118,7 +124,6 @@ export default function SessionPredictionsPage({
   const poolId = params.id;
   const sessionId = params.sessionId;
 
-  // eventId wordt gebruikt voor "terug naar weekend"
   const eventIdFromQuery = searchParams.get("eventId");
 
   const [loading, setLoading] = useState(true);
@@ -154,20 +159,30 @@ export default function SessionPredictionsPage({
     return lockMs - now;
   }, [lockMs, now]);
 
-  // we gebruiken liever sessionRow.event_id (source of truth), query is alleen voor teruglink
   const backToWeekendHref = useMemo(() => {
     const eventId = eventIdFromQuery ?? sessionRow?.event_id ?? null;
     if (!eventId) return `/pools/${poolId}`;
-    // jouw routing is /pools/[id]/event/[eventId]
     return `/pools/${poolId}/event/${eventId}`;
   }, [poolId, eventIdFromQuery, sessionRow?.event_id]);
+
+  // teams->drivers voor nette dropdown
+  const driversByTeam = useMemo(() => getDriversByTeam(), []);
+
+  // set met gekozen drivers (voor duplicate prevention)
+  const selectedSet = useMemo(() => {
+    const s = new Set<string>();
+    for (const c of top10) {
+      const cc = normalizeCode(c);
+      if (cc) s.add(cc);
+    }
+    return s;
+  }, [top10]);
 
   useEffect(() => {
     (async () => {
       setLoading(true);
       setMsg(null);
 
-      // auth
       const { data: u } = await supabase.auth.getUser();
       if (!u.user) {
         router.replace("/login");
@@ -175,7 +190,6 @@ export default function SessionPredictionsPage({
       }
       setUserId(u.user.id);
 
-      // session info
       const { data: sess, error: sessErr } = await supabase
         .from("event_sessions")
         .select("id,event_id,session_key,name,starts_at,lock_at")
@@ -191,7 +205,6 @@ export default function SessionPredictionsPage({
       const srow = sess as SessionRow;
       setSessionRow(srow);
 
-      // prediction row (per event + pool + user)
       const { data: pred, error: predErr } = await supabase
         .from("predictions")
         .select("id,user_id,pool_id,event_id,prediction_json,created_at,updated_at")
@@ -209,7 +222,6 @@ export default function SessionPredictionsPage({
       if (pred) {
         const prow = pred as PredictionRow;
         setPredictionRow(prow);
-
         const loaded = readTop10FromPrediction(prow.prediction_json, sessionId);
         if (loaded) setTop10(loaded);
       } else {
@@ -236,28 +248,15 @@ export default function SessionPredictionsPage({
   async function save() {
     setMsg(null);
 
-    if (!userId) {
-      setMsg("Geen user. Log opnieuw in.");
-      return;
-    }
-    if (!sessionRow) {
-      setMsg("Geen session data geladen.");
-      return;
-    }
-    if (isLocked) {
-      setMsg("Deze sessie is gelockt. Je kunt niet meer opslaan.");
-      return;
-    }
+    if (!userId) return setMsg("Geen user. Log opnieuw in.");
+    if (!sessionRow) return setMsg("Geen session data geladen.");
+    if (isLocked) return setMsg("Deze sessie is gelockt. Je kunt niet meer opslaan.");
 
     const warn = validateTop10(top10);
-    if (warn) {
-      setMsg(warn);
-      return;
-    }
+    if (warn) return setMsg(warn);
 
     setSaving(true);
 
-    // (her)laad current prediction row (veilig)
     const { data: existing, error: findErr } = await supabase
       .from("predictions")
       .select("id,prediction_json")
@@ -268,8 +267,7 @@ export default function SessionPredictionsPage({
 
     if (findErr) {
       setSaving(false);
-      setMsg(findErr.message);
-      return;
+      return setMsg(findErr.message);
     }
 
     const cleanedTop10 = top10.map((x) => normalizeCode(x));
@@ -289,39 +287,30 @@ export default function SessionPredictionsPage({
 
       setSaving(false);
 
-      if (updErr) {
-        setMsg(updErr.message);
-        return;
-      }
+      if (updErr) return setMsg(updErr.message);
 
       setMsg("✅ Opgeslagen.");
-      setPredictionRow((prev) =>
-        prev ? { ...prev, prediction_json: nextJson } : prev
-      );
-      return;
-    } else {
-      const { data: ins, error: insErr } = await supabase
-        .from("predictions")
-        .insert({
-          pool_id: poolId,
-          event_id: sessionRow.event_id,
-          user_id: userId,
-          prediction_json: nextJson,
-        })
-        .select("id,user_id,pool_id,event_id,prediction_json,created_at,updated_at")
-        .single();
-
-      setSaving(false);
-
-      if (insErr) {
-        setMsg(insErr.message);
-        return;
-      }
-
-      setMsg("✅ Opgeslagen.");
-      setPredictionRow(ins as PredictionRow);
+      setPredictionRow((prev) => (prev ? { ...prev, prediction_json: nextJson } : prev));
       return;
     }
+
+    const { data: ins, error: insErr } = await supabase
+      .from("predictions")
+      .insert({
+        pool_id: poolId,
+        event_id: sessionRow.event_id,
+        user_id: userId,
+        prediction_json: nextJson,
+      })
+      .select("id,user_id,pool_id,event_id,prediction_json,created_at,updated_at")
+      .single();
+
+    setSaving(false);
+
+    if (insErr) return setMsg(insErr.message);
+
+    setMsg("✅ Opgeslagen.");
+    setPredictionRow(ins as PredictionRow);
   }
 
   const lockInfo = sessionRow
@@ -359,9 +348,7 @@ export default function SessionPredictionsPage({
           <div style={{ marginTop: 6, opacity: 0.85 }}>
             <div>
               <strong>Start:</strong> {sessionRow ? fmtLocal(sessionRow.starts_at) : "-"}{" "}
-              {sessionRow ? (
-                <span style={{ opacity: 0.7 }}>({sessionRow.session_key})</span>
-              ) : null}
+              {sessionRow ? <span style={{ opacity: 0.7 }}>({sessionRow.session_key})</span> : null}
             </div>
             {lockInfo ? <div style={{ marginTop: 4 }}>{lockInfo}</div> : null}
           </div>
@@ -384,7 +371,7 @@ export default function SessionPredictionsPage({
         Kies per positie een coureur. Elke positie moet uniek zijn.
       </p>
 
-      <div style={{ display: "grid", gap: 8, maxWidth: 620 }}>
+      <div style={{ display: "grid", gap: 8, maxWidth: 720 }}>
         {top10.map((v, idx) => {
           const pos = idx + 1;
           const color = v ? getTeamColorByDriverCode(v) : "#999";
@@ -429,10 +416,19 @@ export default function SessionPredictionsPage({
                   }}
                 >
                   <option value="">— Kies coureur —</option>
-                  {F1_DRIVERS_2026.map((d) => (
-                    <option key={d.code} value={d.code}>
-                      {d.code} — {d.name} ({d.teamName})
-                    </option>
+
+                  {driversByTeam.map(({ team, drivers }) => (
+                    <optgroup key={team.id} label={team.name}>
+                      {drivers.map((d) => {
+                        // duplicate-preventie: disable als al gekozen in andere positie
+                        const isTakenElsewhere = selectedSet.has(d.code) && d.code !== v;
+                        return (
+                          <option key={d.code} value={d.code} disabled={isTakenElsewhere}>
+                            {d.code} — {d.name}
+                          </option>
+                        );
+                      })}
+                    </optgroup>
                   ))}
                 </select>
               </div>
@@ -467,7 +463,8 @@ export default function SessionPredictionsPage({
 
       <div style={{ marginTop: 14, fontSize: 12, opacity: 0.7 }}>
         <div>
-          <strong>Opslag:</strong> predictions (event-based) → <code>prediction_json.sessions[sessionId].top10</code>
+          <strong>Opslag:</strong> predictions (event-based) →{" "}
+          <code>prediction_json.sessions[sessionId].top10</code>
         </div>
       </div>
     </main>
