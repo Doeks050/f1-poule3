@@ -17,9 +17,9 @@ type SessionRow = {
 
 type PredictionRow = {
   id: string;
+  user_id: string;
   pool_id: string;
   event_id: string;
-  user_id: string;
   prediction_json: any; // jsonb
   created_at?: string;
   updated_at?: string;
@@ -54,56 +54,57 @@ function fmtCountdown(ms: number) {
   return days > 0 ? `${days}d ${hh}:${mm}:${ss}` : `${hh}:${mm}:${ss}`;
 }
 
-function defaultTop10() {
-  return Array.from({ length: 10 }, () => "");
-}
-
 function normalizeCode(v: string) {
   return (v ?? "").trim().toUpperCase();
 }
 
-function validateTop10(arr: string[]) {
-  const cleaned = arr.map((x) => normalizeCode(x)).map((x) => x.replace(/\s+/g, ""));
-  const nonEmpty = cleaned.filter((x) => x.length > 0);
-  const set = new Set(nonEmpty);
-  if (set.size !== nonEmpty.length) return "Dubbele driver codes gevonden. Elke positie moet uniek zijn.";
-  return null;
+function defaultTop10() {
+  return Array.from({ length: 10 }, () => "");
 }
 
 /**
- * prediction_json format:
+ * prediction_json formaat (per sessie) in predictions:
  * {
  *   version: 1,
  *   sessions: {
- *     fp1: { top10: ["VER", ...] },
- *     quali: { top10: [...] },
- *     race: { top10: [...] }
+ *     [sessionId]: {
+ *       session_key: "fp1" | "fp2" | ...,
+ *       top10: ["VER","HAM",...]
+ *     }
  *   }
  * }
  */
-function readSessionTop10FromJson(predictionJson: any, sessionKey: string): string[] | null {
-  const top10 = predictionJson?.sessions?.[sessionKey]?.top10;
-  if (Array.isArray(top10) && top10.length === 10) {
-    return top10.map((x: any) => (typeof x === "string" ? x : ""));
+function readTop10FromPrediction(prediction_json: any, sessionId: string): string[] | null {
+  if (!prediction_json) return null;
+  const sess = prediction_json?.sessions?.[sessionId];
+  if (sess && Array.isArray(sess?.top10) && sess.top10.length === 10) {
+    return sess.top10.map((x: any) => (typeof x === "string" ? normalizeCode(x) : ""));
   }
   return null;
 }
 
-function writeSessionTop10ToJson(predictionJson: any, sessionKey: string, top10: string[]) {
-  const base = predictionJson && typeof predictionJson === "object" ? predictionJson : {};
-  const version = base.version ?? 1;
+function upsertSessionTop10(prediction_json: any, sessionId: string, session_key: string, top10: string[]) {
+  const base = prediction_json && typeof prediction_json === "object" ? prediction_json : {};
   const sessions = base.sessions && typeof base.sessions === "object" ? base.sessions : {};
+
   return {
+    version: 1,
     ...base,
-    version,
     sessions: {
       ...sessions,
-      [sessionKey]: {
-        ...(sessions?.[sessionKey] ?? {}),
+      [sessionId]: {
+        session_key,
         top10,
       },
     },
   };
+}
+
+function validateTop10(arr: string[]) {
+  const cleaned = arr.map((x) => normalizeCode(x)).filter((x) => x.length > 0);
+  const set = new Set(cleaned);
+  if (set.size !== cleaned.length) return "Dubbele coureurs gekozen. Elke positie moet uniek zijn.";
+  return null;
 }
 
 export default function SessionPredictionsPage({
@@ -117,7 +118,7 @@ export default function SessionPredictionsPage({
   const poolId = params.id;
   const sessionId = params.sessionId;
 
-  // eventId zit in query (om terug te linken naar weekend page)
+  // eventId wordt gebruikt voor "terug naar weekend"
   const eventIdFromQuery = searchParams.get("eventId");
 
   const [loading, setLoading] = useState(true);
@@ -125,6 +126,8 @@ export default function SessionPredictionsPage({
 
   const [userId, setUserId] = useState<string | null>(null);
   const [sessionRow, setSessionRow] = useState<SessionRow | null>(null);
+
+  const [predictionRow, setPredictionRow] = useState<PredictionRow | null>(null);
 
   const [top10, setTop10] = useState<string[]>(defaultTop10());
   const [saving, setSaving] = useState(false);
@@ -151,11 +154,13 @@ export default function SessionPredictionsPage({
     return lockMs - now;
   }, [lockMs, now]);
 
+  // we gebruiken liever sessionRow.event_id (source of truth), query is alleen voor teruglink
   const backToWeekendHref = useMemo(() => {
-    if (!eventIdFromQuery) return `/pools/${poolId}`;
-    // ✅ route is /event/[eventId]
-    return `/pools/${poolId}/event/${eventIdFromQuery}`;
-  }, [poolId, eventIdFromQuery]);
+    const eventId = eventIdFromQuery ?? sessionRow?.event_id ?? null;
+    if (!eventId) return `/pools/${poolId}`;
+    // jouw routing is /pools/[id]/event/[eventId]
+    return `/pools/${poolId}/event/${eventId}`;
+  }, [poolId, eventIdFromQuery, sessionRow?.event_id]);
 
   useEffect(() => {
     (async () => {
@@ -183,15 +188,15 @@ export default function SessionPredictionsPage({
         return;
       }
 
-      const sr = sess as SessionRow;
-      setSessionRow(sr);
+      const srow = sess as SessionRow;
+      setSessionRow(srow);
 
-      // ✅ prediction row is per (pool_id, event_id, user_id)
+      // prediction row (per event + pool + user)
       const { data: pred, error: predErr } = await supabase
         .from("predictions")
-        .select("id,pool_id,event_id,user_id,prediction_json,created_at,updated_at")
+        .select("id,user_id,pool_id,event_id,prediction_json,created_at,updated_at")
         .eq("pool_id", poolId)
-        .eq("event_id", sr.event_id)
+        .eq("event_id", srow.event_id)
         .eq("user_id", u.user.id)
         .maybeSingle();
 
@@ -202,18 +207,23 @@ export default function SessionPredictionsPage({
       }
 
       if (pred) {
-        const loaded = readSessionTop10FromJson((pred as PredictionRow).prediction_json, sr.session_key);
-        if (loaded) setTop10(loaded.map((x) => normalizeCode(x)));
+        const prow = pred as PredictionRow;
+        setPredictionRow(prow);
+
+        const loaded = readTop10FromPrediction(prow.prediction_json, sessionId);
+        if (loaded) setTop10(loaded);
+      } else {
+        setPredictionRow(null);
       }
 
       setLoading(false);
     })();
   }, [router, poolId, sessionId]);
 
-  function updatePos(idx: number, code: string) {
+  function updatePos(idx: number, value: string) {
     setTop10((prev) => {
       const next = [...prev];
-      next[idx] = normalizeCode(code);
+      next[idx] = normalizeCode(value);
       return next;
     });
   }
@@ -247,7 +257,7 @@ export default function SessionPredictionsPage({
 
     setSaving(true);
 
-    // Find existing row for this weekend
+    // (her)laad current prediction row (veilig)
     const { data: existing, error: findErr } = await supabase
       .from("predictions")
       .select("id,prediction_json")
@@ -263,7 +273,13 @@ export default function SessionPredictionsPage({
     }
 
     const cleanedTop10 = top10.map((x) => normalizeCode(x));
-    const nextJson = writeSessionTop10ToJson(existing?.prediction_json, sessionRow.session_key, cleanedTop10);
+
+    const nextJson = upsertSessionTop10(
+      existing?.prediction_json,
+      sessionId,
+      sessionRow.session_key,
+      cleanedTop10
+    );
 
     if (existing?.id) {
       const { error: updErr } = await supabase
@@ -277,15 +293,23 @@ export default function SessionPredictionsPage({
         setMsg(updErr.message);
         return;
       }
+
       setMsg("✅ Opgeslagen.");
+      setPredictionRow((prev) =>
+        prev ? { ...prev, prediction_json: nextJson } : prev
+      );
       return;
     } else {
-      const { error: insErr } = await supabase.from("predictions").insert({
-        pool_id: poolId,
-        event_id: sessionRow.event_id,
-        user_id: userId,
-        prediction_json: nextJson,
-      });
+      const { data: ins, error: insErr } = await supabase
+        .from("predictions")
+        .insert({
+          pool_id: poolId,
+          event_id: sessionRow.event_id,
+          user_id: userId,
+          prediction_json: nextJson,
+        })
+        .select("id,user_id,pool_id,event_id,prediction_json,created_at,updated_at")
+        .single();
 
       setSaving(false);
 
@@ -293,10 +317,18 @@ export default function SessionPredictionsPage({
         setMsg(insErr.message);
         return;
       }
+
       setMsg("✅ Opgeslagen.");
+      setPredictionRow(ins as PredictionRow);
       return;
     }
   }
+
+  const lockInfo = sessionRow
+    ? isLocked
+      ? `🔒 Gelockt sinds ${fmtLocal(sessionRow.lock_at)}`
+      : `🔓 Open • Lock in ${fmtCountdown(lockInMs ?? 0)} (om ${fmtLocal(sessionRow.lock_at)})`
+    : null;
 
   if (loading) {
     return (
@@ -313,17 +345,11 @@ export default function SessionPredictionsPage({
         <h1>Session</h1>
         <p style={{ color: "crimson" }}>{msg}</p>
         <p>
-          <Link href={backToWeekendHref}>← Terug</Link>
+          <Link href={`/pools/${poolId}`}>← Terug</Link>
         </p>
       </main>
     );
   }
-
-  const lockInfo = sessionRow
-    ? isLocked
-      ? `🔒 Gelockt sinds ${fmtLocal(sessionRow.lock_at)}`
-      : `🔓 Open • Lock in ${fmtCountdown(lockInMs ?? 0)} (om ${fmtLocal(sessionRow.lock_at)})`
-    : null;
 
   return (
     <main style={{ padding: 16, maxWidth: 900 }}>
@@ -333,7 +359,9 @@ export default function SessionPredictionsPage({
           <div style={{ marginTop: 6, opacity: 0.85 }}>
             <div>
               <strong>Start:</strong> {sessionRow ? fmtLocal(sessionRow.starts_at) : "-"}{" "}
-              {sessionRow ? <span style={{ opacity: 0.7 }}>({sessionRow.session_key})</span> : null}
+              {sessionRow ? (
+                <span style={{ opacity: 0.7 }}>({sessionRow.session_key})</span>
+              ) : null}
             </div>
             {lockInfo ? <div style={{ marginTop: 4 }}>{lockInfo}</div> : null}
           </div>
@@ -356,50 +384,58 @@ export default function SessionPredictionsPage({
         Kies per positie een coureur. Elke positie moet uniek zijn.
       </p>
 
-      <div style={{ display: "grid", gap: 8, maxWidth: 720 }}>
+      <div style={{ display: "grid", gap: 8, maxWidth: 620 }}>
         {top10.map((v, idx) => {
           const pos = idx + 1;
           const color = v ? getTeamColorByDriverCode(v) : "#999";
+          const selected = F1_DRIVERS_2026.find((d) => d.code === v);
+
           return (
             <div
               key={idx}
               style={{
                 display: "grid",
-                gridTemplateColumns: "52px 16px 1fr",
+                gridTemplateColumns: "52px 1fr",
                 gap: 10,
                 alignItems: "center",
               }}
             >
               <div style={{ fontWeight: 700 }}>P{pos}</div>
 
-              <div
-                title={v ? `Teamkleur (${v})` : "Teamkleur"}
-                style={{
-                  width: 14,
-                  height: 14,
-                  borderRadius: 4,
-                  background: color,
-                  border: "1px solid rgba(0,0,0,0.2)",
-                }}
-              />
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span
+                  title={selected?.teamName ?? ""}
+                  style={{
+                    width: 12,
+                    height: 12,
+                    borderRadius: 999,
+                    background: color,
+                    display: "inline-block",
+                    border: "1px solid rgba(0,0,0,0.2)",
+                    flex: "0 0 auto",
+                  }}
+                />
 
-              <select
-                value={v}
-                onChange={(e) => updatePos(idx, e.target.value)}
-                disabled={isLocked}
-                style={{
-                  padding: "8px 10px",
-                  border: "1px solid #ccc",
-                  borderRadius: 8,
-                }}
-              >
-                <option value="">— kies driver —</option>
-                {F1_DRIVERS_2026.map((d) => (
-                  <option key={d.code} value={d.code}>
-                    {d.code} — {d.name} ({d.teamName})
-                  </option>
-                ))}
-              </select>
+                <select
+                  value={v}
+                  onChange={(e) => updatePos(idx, e.target.value)}
+                  disabled={isLocked}
+                  style={{
+                    width: "100%",
+                    padding: "8px 10px",
+                    border: "1px solid #ccc",
+                    borderRadius: 8,
+                    background: "white",
+                  }}
+                >
+                  <option value="">— Kies coureur —</option>
+                  {F1_DRIVERS_2026.map((d) => (
+                    <option key={d.code} value={d.code}>
+                      {d.code} — {d.name} ({d.teamName})
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
           );
         })}
@@ -424,8 +460,16 @@ export default function SessionPredictionsPage({
           Deze sessie is gelockt. Je kunt je voorspelling nog wel bekijken, maar niet wijzigen.
         </p>
       ) : (
-        <p style={{ marginTop: 12, opacity: 0.75 }}>Tip: je kunt later terugkomen en aanpassen tot de lock-tijd.</p>
+        <p style={{ marginTop: 12, opacity: 0.75 }}>
+          Tip: je kunt later terugkomen en aanpassen tot de lock-tijd.
+        </p>
       )}
+
+      <div style={{ marginTop: 14, fontSize: 12, opacity: 0.7 }}>
+        <div>
+          <strong>Opslag:</strong> predictions (event-based) → <code>prediction_json.sessions[sessionId].top10</code>
+        </div>
+      </div>
     </main>
   );
 }
