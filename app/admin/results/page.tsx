@@ -23,7 +23,7 @@ type SessionRow = {
 
 type EventResultsRow = {
   event_id: string;
-  results: any; // jsonb
+  result_json: any; // jsonb (NOT NULL)
   updated_by?: string | null;
   updated_at?: string | null;
 };
@@ -49,16 +49,16 @@ function fmtLocal(iso: string) {
 }
 
 /**
- * event_results.results structure (versioned):
+ * result_json structure:
  * {
  *   "version": 1,
  *   "sessions": {
- *     "<sessionId>": { "session_key": "fp1|fp2|...|race", "top10": ["VER",...10] }
+ *     "<sessionId>": { "session_key": "...", "top10": ["VER",...10] }
  *   }
  * }
  */
-function readTop10FromResults(resultsJson: any, sessionId: string): string[] | null {
-  const top10 = resultsJson?.sessions?.[sessionId]?.top10;
+function readTop10FromResults(resultJson: any, sessionId: string): string[] | null {
+  const top10 = resultJson?.sessions?.[sessionId]?.top10;
   if (Array.isArray(top10) && top10.length === 10) {
     return top10.map((x: any) => (typeof x === "string" ? normalizeCode(x) : ""));
   }
@@ -66,12 +66,12 @@ function readTop10FromResults(resultsJson: any, sessionId: string): string[] | n
 }
 
 function upsertSessionTop10IntoResults(
-  resultsJson: any,
+  resultJson: any,
   sessionId: string,
   session_key: string,
   top10: string[]
 ) {
-  const base = resultsJson && typeof resultsJson === "object" ? resultsJson : {};
+  const base = resultJson && typeof resultJson === "object" ? resultJson : {};
   const sessions = base.sessions && typeof base.sessions === "object" ? base.sessions : {};
 
   return {
@@ -106,18 +106,13 @@ export default function AdminResultsPage() {
   const [events, setEvents] = useState<EventRow[]>([]);
   const [selectedEventId, setSelectedEventId] = useState<string>("");
 
-  // keep create event for testing
   const [newEventName, setNewEventName] = useState("");
   const [newEventStartsAt, setNewEventStartsAt] = useState("");
 
-  // sessions for selected event
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string>("");
 
-  // loaded event_results row
   const [eventResultsRow, setEventResultsRow] = useState<EventResultsRow | null>(null);
-
-  // editing top10 for selected session
   const [top10, setTop10] = useState<string[]>(defaultTop10());
 
   const [saving, setSaving] = useState(false);
@@ -146,7 +141,6 @@ export default function AdminResultsPage() {
 
     setEmail(user.email ?? "");
 
-    // admin check
     const { data: adminRow, error: adminErr } = await supabase
       .from("app_admins")
       .select("user_id")
@@ -168,7 +162,6 @@ export default function AdminResultsPage() {
 
     setIsAdmin(true);
 
-    // events
     const { data: eventRows, error: eventsErr } = await supabase
       .from("events")
       .select("id,name,starts_at,format")
@@ -193,7 +186,7 @@ export default function AdminResultsPage() {
   async function loadEventResults(eventId: string) {
     const { data, error } = await supabase
       .from("event_results")
-      .select("event_id,results,updated_by,updated_at")
+      .select("event_id,result_json,updated_by,updated_at")
       .eq("event_id", eventId)
       .maybeSingle();
 
@@ -223,15 +216,15 @@ export default function AdminResultsPage() {
     const list = (data ?? []) as SessionRow[];
     setSessions(list);
 
-    // pick first session by default
-    if (list.length > 0) {
-      setSelectedSessionId(list[0].id);
-    } else {
-      setSelectedSessionId("");
-    }
+    if (list.length > 0) setSelectedSessionId(list[0].id);
+    else setSelectedSessionId("");
   }
 
-  // when event changes: load sessions + event_results
+  useEffect(() => {
+    loadAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     (async () => {
       if (!selectedEventId) return;
@@ -242,25 +235,14 @@ export default function AdminResultsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedEventId]);
 
-  // when session changes OR event_results changes: load top10 for that session
   useEffect(() => {
     if (!selectedSessionId) {
       setTop10(defaultTop10());
       return;
     }
-
-    const loaded = readTop10FromResults(eventResultsRow?.results, selectedSessionId);
-    if (loaded) {
-      setTop10(loaded);
-    } else {
-      setTop10(defaultTop10());
-    }
+    const loaded = readTop10FromResults(eventResultsRow?.result_json, selectedSessionId);
+    setTop10(loaded ?? defaultTop10());
   }, [selectedSessionId, eventResultsRow]);
-
-  useEffect(() => {
-    loadAll();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   async function createEvent() {
     setMsg(null);
@@ -311,20 +293,11 @@ export default function AdminResultsPage() {
   async function saveResultsForSession() {
     setMsg(null);
 
-    if (!selectedEventId) {
-      setMsg("Selecteer eerst een event.");
-      return;
-    }
-    if (!selectedSession) {
-      setMsg("Selecteer eerst een sessie.");
-      return;
-    }
+    if (!selectedEventId) return setMsg("Selecteer eerst een event.");
+    if (!selectedSession) return setMsg("Selecteer eerst een sessie.");
 
     const warn = validateTop10(top10);
-    if (warn) {
-      setMsg(warn);
-      return;
-    }
+    if (warn) return setMsg(warn);
 
     setSaving(true);
 
@@ -334,7 +307,7 @@ export default function AdminResultsPage() {
     // reload existing (safe)
     const { data: existing, error: findErr } = await supabase
       .from("event_results")
-      .select("event_id,results")
+      .select("event_id,result_json")
       .eq("event_id", selectedEventId)
       .maybeSingle();
 
@@ -346,7 +319,7 @@ export default function AdminResultsPage() {
 
     const cleanedTop10 = top10.map((x) => normalizeCode(x));
     const nextJson = upsertSessionTop10IntoResults(
-      existing?.results,
+      existing?.result_json ?? {}, // ✅ NOT NULL column, so we ensure object
       selectedSession.id,
       selectedSession.session_key,
       cleanedTop10
@@ -357,12 +330,12 @@ export default function AdminResultsPage() {
       .upsert(
         {
           event_id: selectedEventId,
-          results: nextJson,
+          result_json: nextJson, // ✅ correct column
           updated_by: user?.id ?? null,
         },
         { onConflict: "event_id" }
       )
-      .select("event_id,results,updated_by,updated_at")
+      .select("event_id,result_json,updated_by,updated_at")
       .maybeSingle();
 
     setSaving(false);
@@ -372,8 +345,7 @@ export default function AdminResultsPage() {
       return;
     }
 
-    // refresh local
-    setEventResultsRow((up ?? { event_id: selectedEventId, results: nextJson }) as any);
+    setEventResultsRow((up ?? { event_id: selectedEventId, result_json: nextJson }) as any);
     setMsg("✅ Results opgeslagen voor deze sessie.");
   }
 
@@ -381,8 +353,6 @@ export default function AdminResultsPage() {
     await supabase.auth.signOut();
     router.replace("/login");
   }
-
-  const formatText = selectedEvent?.format ? ` • ${selectedEvent.format}` : "";
 
   if (loading) {
     return (
@@ -437,7 +407,7 @@ export default function AdminResultsPage() {
               <div>
                 <strong>Start:</strong>{" "}
                 {selectedEvent.starts_at ? fmtLocal(selectedEvent.starts_at) : "—"}
-                {formatText}
+                {selectedEvent.format ? ` • ${selectedEvent.format}` : ""}
               </div>
             </div>
           ) : null}
@@ -485,7 +455,6 @@ export default function AdminResultsPage() {
             </div>
           </div>
 
-          {/* keep create event for testing */}
           <div style={{ marginTop: 22 }}>
             <h3>Nieuw event (test)</h3>
             <input
@@ -518,8 +487,7 @@ export default function AdminResultsPage() {
           <h2>Results: Top 10 (per sessie)</h2>
 
           <p style={{ marginTop: 6, opacity: 0.85 }}>
-            Vul de officiële top 10 in voor de geselecteerde sessie. Opslag gaat naar{" "}
-            <code>event_results.results.sessions[sessionId].top10</code>.
+            Opslag gaat naar <code>event_results.result_json.sessions[sessionId].top10</code>
           </p>
 
           <div style={{ marginTop: 14, display: "grid", gap: 8, maxWidth: 720 }}>
@@ -586,7 +554,7 @@ export default function AdminResultsPage() {
           <details style={{ marginTop: 16, opacity: 0.9 }}>
             <summary>Debug: opgeslagen JSON bekijken</summary>
             <pre style={{ marginTop: 10, padding: 12, background: "#f7f7f7", borderRadius: 10 }}>
-              {JSON.stringify(eventResultsRow?.results ?? {}, null, 2)}
+              {JSON.stringify(eventResultsRow?.result_json ?? {}, null, 2)}
             </pre>
           </details>
         </section>
