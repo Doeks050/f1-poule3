@@ -67,6 +67,7 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
 
     const admin = supabaseAdmin();
 
+    // ✅ membership check (moet pool member zijn)
     const { data: membership, error: memErr } = await admin
       .from("pool_members")
       .select("pool_id,user_id")
@@ -77,6 +78,7 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
     if (memErr) return NextResponse.json({ error: memErr.message }, { status: 500 });
     if (!membership) return NextResponse.json({ error: "Not a pool member" }, { status: 403 });
 
+    // Events laden (globaal)
     const { data: events, error: eventsErr } = await admin
       .from("events")
       .select("id,name,starts_at,format")
@@ -86,9 +88,10 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
 
     const eventIds = (events ?? []).map((e: any) => e.id);
     if (eventIds.length === 0) {
-      return NextResponse.json({ ok: true, leaderboard: [], events: [] });
+      return NextResponse.json({ ok: true, poolId, leaderboard: [] });
     }
 
+    // Sessions voor alle events
     const { data: sessions, error: sessErr } = await admin
       .from("event_sessions")
       .select("id,event_id,session_key,name,starts_at,lock_at")
@@ -97,15 +100,22 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
 
     if (sessErr) return NextResponse.json({ error: sessErr.message }, { status: 500 });
 
+    // ✅ Members + display_name ophalen (hier zat je bug: je had alleen user_id)
     const { data: members, error: membersErr } = await admin
       .from("pool_members")
-      .select("user_id")
+      .select("user_id,display_name")
       .eq("pool_id", poolId);
 
     if (membersErr) return NextResponse.json({ error: membersErr.message }, { status: 500 });
 
     const memberIds = (members ?? []).map((m: any) => m.user_id);
 
+    const displayNameByUser: Record<string, string | null> = {};
+    for (const m of members ?? []) {
+      displayNameByUser[m.user_id] = m.display_name ?? null;
+    }
+
+    // Predictions van members voor events
     const { data: predictions, error: predErr } = await admin
       .from("predictions")
       .select("user_id,pool_id,event_id,prediction_json")
@@ -115,6 +125,7 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
 
     if (predErr) return NextResponse.json({ error: predErr.message }, { status: 500 });
 
+    // Results per event
     const { data: resultsRows, error: resErr } = await admin
       .from("event_results")
       .select("event_id,result_json,results,updated_at")
@@ -135,8 +146,10 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
       (sessionsByEvent[s.event_id] ||= []).push(s as SessionRow);
     }
 
+    // ✅ rows nu inclusief display_name
     const rows = memberIds.map((uid: string) => ({
       user_id: uid,
+      display_name: displayNameByUser[uid] ?? null,
       total_points: 0,
     }));
 
