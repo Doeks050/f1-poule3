@@ -381,21 +381,9 @@ if (!membership) {
             </div>
           </div>
 
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button
-              onClick={copyInvite}
-              style={{ padding: "8px 12px", borderRadius: 10 }}
-            >
-              Copy invite link
-            </button>
-
-            <Link
-              href={`/pools/${poolId}/members`}
-              style={{ textDecoration: "underline", padding: "8px 0" }}
-            >
-              Bekijk members →
-            </Link>
-          </div>
+         <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 8 }}>
+         <button onClick={copyInviteLink}>Copy invite link</button>
+         </div>
 
           <div style={{ fontSize: 12, opacity: 0.65 }}>
             Joinen kan alleen via invite link/code. Bij join is username
