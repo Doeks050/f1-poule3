@@ -111,11 +111,34 @@ export default function PoolDetailPage() {
         return;
       }
 
-      if (!poolId || !isUuid) {
-        setMsg(`Pool id ontbreekt of is ongeldig: "${poolId || "leeg"}"`);
-        setLoading(false);
-        return;
-      }
+      const user = userData.user;
+
+if (!poolId || !isUuid) {
+  setMsg(`Pool id ontbreekt of is ongeldig: "${poolId || "leeg"}"`);
+  setLoading(false);
+  return;
+}
+
+// 🔒 Controleer of gebruiker lid is van deze pool
+const { data: membership, error: memErr } = await supabase
+  .from("pool_members")
+  .select("pool_id,user_id")
+  .eq("pool_id", poolId)
+  .eq("user_id", user.id)
+  .maybeSingle();
+
+if (memErr) {
+  setMsg(memErr.message);
+  setLoading(false);
+  return;
+}
+
+if (!membership) {
+  // Geen toegang zonder invite
+  router.replace("/pools");
+  return;
+}
+
 
       // ✅ Pool ophalen
       const { data: poolRow, error: poolErr } = await supabase
