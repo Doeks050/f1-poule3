@@ -382,7 +382,7 @@ if (!membership) {
           </div>
 
          <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 8 }}>
-         <button onClick={copyInviteLink}>Copy invite link</button>
+         <button onClick={copyInvite}>Copy invite link</button>
          </div>
 
           <div style={{ fontSize: 12, opacity: 0.65 }}>
