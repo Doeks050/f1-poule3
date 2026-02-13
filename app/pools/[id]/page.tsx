@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { supabase } from "../../../lib/supabaseClient";
+import LeaderboardPanel from "./LeaderboardPanel";
 
 type PoolRow = {
   id: string;
@@ -251,6 +252,10 @@ export default function PoolDetailPage() {
                 </div>
               )}
             </div>
+          </div>
+
+          <div style={{ marginTop: 18 }}>
+          <LeaderboardPanel poolId={poolId} />
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "flex-end" }}>
