@@ -265,6 +265,8 @@ if (!membership) {
 
       <h1 style={{ marginBottom: 8 }}>{pool?.name ?? "Pool"}</h1>
 
+      <Link href={`/pools/${poolId}/members`}>Members</Link>
+
       {msg && <p style={{ color: "crimson" }}>{msg}</p>}
 
       {/* ✅ HERO KAART */}
