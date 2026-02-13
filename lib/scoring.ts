@@ -1,34 +1,63 @@
 // lib/scoring.ts
 
-export const SESSION_POINTS: Record<string, number> = {
-  fp1: 1,
-  fp2: 1,
-  fp3: 1,
-  sq: 3,
-  quali: 3,
-  sprint: 4,
-  race: 5,
-};
+export function normalizeTop10(input: any): string[] | null {
+  if (!Array.isArray(input) || input.length !== 10) return null;
 
-export function normalizeCode(v: any): string {
-  return String(v ?? "").trim().toUpperCase();
+  const arr = input.map((x) =>
+    typeof x === "string" ? x.trim().toUpperCase().replace(/\s+/g, "") : ""
+  );
+
+  // Als alles leeg is: behandelen als "geen top10"
+  if (arr.every((x) => x === "")) return null;
+
+  return arr;
 }
 
-export function normalizeTop10(arr: any): string[] | null {
-  if (!Array.isArray(arr) || arr.length !== 10) return null;
-  return arr.map(normalizeCode);
+export function pointsPerCorrectPosition(sessionKey: string): number {
+  const k = (sessionKey ?? "").toLowerCase();
+
+  // FP
+  if (k === "fp1" || k === "fp2" || k === "fp3") return 1;
+
+  // Sprint Quali
+  if (k === "sprint_quali" || k === "sprintquali" || k === "sq") return 3;
+
+  // Quali
+  if (k === "quali" || k === "q") return 3;
+
+  // Sprint Race
+  if (k === "sprint_race" || k === "sprintrace" || k === "sr") return 4;
+
+  // Race
+  if (k === "race" || k === "r") return 5;
+
+  return 0;
 }
 
-export function isExactTop10Match(predTop10: any, resultTop10: any): boolean {
-  const p = normalizeTop10(predTop10);
-  const r = normalizeTop10(resultTop10);
-  if (!p || !r) return false;
-  for (let i = 0; i < 10; i++) if (p[i] !== r[i]) return false;
-  return true;
+function countCorrectPositions(pred: string[], res: string[]): number {
+  let correct = 0;
+  for (let i = 0; i < 10; i++) {
+    if ((pred[i] ?? "") !== "" && pred[i] === res[i]) correct++;
+  }
+  return correct;
 }
 
-export function pointsForSession(sessionKey: string, predTop10: any, resultTop10: any): number {
-  const pts = SESSION_POINTS[sessionKey] ?? 0;
-  if (!pts) return 0;
-  return isExactTop10Match(predTop10, resultTop10) ? pts : 0;
+/**
+ * Score = (#correcte posities) * (punten per correcte positie)
+ * - FP: max 10
+ * - Sprint/Quali: max 30
+ * - Sprint race: max 40
+ * - Race: max 50
+ */
+export function pointsForSession(
+  sessionKey: string,
+  predTop10: string[] | null,
+  resultTop10: string[] | null
+): number {
+  const ppc = pointsPerCorrectPosition(sessionKey);
+  if (ppc <= 0) return 0;
+  if (!predTop10 || !resultTop10) return 0;
+
+  const correct = countCorrectPositions(predTop10, resultTop10);
+  return correct * ppc;
 }
