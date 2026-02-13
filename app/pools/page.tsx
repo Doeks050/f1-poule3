@@ -28,6 +28,17 @@ export default function PoolsPage() {
         return;
       }
 
+     const { data: prof } = await supabase
+       .from("profiles")
+       .select("display_name")
+       .eq("id", user.id)
+       .maybeSingle();
+
+     if (!prof?.display_name) {
+     router.replace("/onboarding/username");
+     return;
+     }
+ 
       setEmail(data.user.email ?? "");
 
       // simpel: toon pools waar user member is (als je die al hebt)
