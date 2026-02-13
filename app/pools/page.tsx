@@ -23,16 +23,20 @@ export default function PoolsPage() {
       setMsg(null);
 
       const { data } = await supabase.auth.getUser();
-      if (!data.user) {
-        router.replace("/login");
-        return;
-      }
 
-     const { data: prof } = await supabase
-       .from("profiles")
-       .select("display_name")
-       .eq("id", user.id)
-       .maybeSingle();
+if (!data.user) {
+  router.replace("/login");
+  return;
+}
+
+const user = data.user;
+
+const { data: prof } = await supabase
+  .from("profiles")
+  .select("display_name")
+  .eq("id", user.id)
+  .maybeSingle();
+
 
      if (!prof?.display_name) {
      router.replace("/onboarding/username");
