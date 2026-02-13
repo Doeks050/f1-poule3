@@ -8,14 +8,24 @@ import { supabase } from "../../lib/supabaseClient";
 type PoolRow = {
   id: string;
   name: string;
+  invite_code?: string | null;
+  created_at?: string | null;
 };
 
 export default function PoolsPage() {
   const router = useRouter();
+
   const [email, setEmail] = useState<string>("");
   const [msg, setMsg] = useState<string | null>(null);
-  const [pools, setPools] = useState<PoolRow[]>([]);
   const [loading, setLoading] = useState(true);
+
+  const [pools, setPools] = useState<PoolRow[]>([]);
+  const [joinCode, setJoinCode] = useState("");
+  const [joining, setJoining] = useState(false);
+
+  function normalizeInviteCode(v: string) {
+    return (v ?? "").trim().toUpperCase();
+  }
 
   useEffect(() => {
     (async () => {
@@ -23,56 +33,68 @@ export default function PoolsPage() {
       setMsg(null);
 
       const { data } = await supabase.auth.getUser();
+      if (!data.user) {
+        router.replace("/login");
+        return;
+      }
 
-if (!data.user) {
-  router.replace("/login");
-  return;
-}
+      const user = data.user;
+      setEmail(user.email ?? "");
 
-const user = data.user;
+      // 1) Username gate
+      const { data: prof, error: profErr } = await supabase
+        .from("profiles")
+        .select("display_name")
+        .eq("id", user.id)
+        .maybeSingle();
 
-const { data: prof } = await supabase
-  .from("profiles")
-  .select("display_name")
-  .eq("id", user.id)
-  .maybeSingle();
+      if (profErr) {
+        setMsg(profErr.message);
+        setLoading(false);
+        return;
+      }
 
+      if (!prof?.display_name) {
+        router.replace("/onboarding/username");
+        return;
+      }
 
-     if (!prof?.display_name) {
-     router.replace("/onboarding/username");
-     return;
-     }
- 
-      setEmail(data.user.email ?? "");
-
-      // simpel: toon pools waar user member is (als je die al hebt)
-      // fallback: toon alle pools als pool_members nog niet gebruikt wordt
+      // 2) Alleen pools waar je member bent (GEEN fallback naar alle pools)
+      // We halen eerst pool_ids uit pool_members, en daarna pools op.
       const { data: memberRows, error: mErr } = await supabase
         .from("pool_members")
         .select("pool_id")
-        .eq("user_id", data.user.id);
+        .eq("user_id", user.id);
 
-      if (!mErr && memberRows && memberRows.length > 0) {
-        const poolIds = memberRows.map((r: any) => r.pool_id);
-
-        const { data: poolRows, error: pErr } = await supabase
-          .from("pools")
-          .select("id,name")
-          .in("id", poolIds)
-          .order("created_at", { ascending: false });
-
-        if (pErr) setMsg(pErr.message);
-        setPools((poolRows ?? []) as PoolRow[]);
-      } else {
-        const { data: poolRows, error: pErr } = await supabase
-          .from("pools")
-          .select("id,name")
-          .order("created_at", { ascending: false });
-
-        if (pErr) setMsg(pErr.message);
-        setPools((poolRows ?? []) as PoolRow[]);
+      if (mErr) {
+        setMsg(mErr.message);
+        setPools([]);
+        setLoading(false);
+        return;
       }
 
+      const poolIds = (memberRows ?? []).map((r: any) => r.pool_id).filter(Boolean);
+
+      if (poolIds.length === 0) {
+        setPools([]);
+        setLoading(false);
+        return;
+      }
+
+      const { data: poolRows, error: pErr } = await supabase
+        .from("pools")
+        .select("id,name,invite_code,created_at")
+        .in("id", poolIds)
+        .order("created_at", { ascending: false });
+
+      if (pErr) {
+        setMsg(pErr.message);
+        setPools([]);
+        setLoading(false);
+        return;
+      }
+
+      setPools((poolRows ?? []) as PoolRow[]);
       setLoading(false);
     })();
   }, [router]);
@@ -82,26 +104,132 @@ const { data: prof } = await supabase
     router.replace("/login");
   }
 
-  return (
-    <main style={{ padding: 16 }}>
-      <h1>Mijn pools</h1>
-      <p>Ingelogd als: {email || "-"}</p>
+  async function joinPool() {
+    setMsg(null);
 
-      <button onClick={logout}>Logout</button>
+    const code = normalizeInviteCode(joinCode);
+    if (!code) {
+      setMsg("Vul een invite code in.");
+      return;
+    }
+
+    setJoining(true);
+
+    const { data: u } = await supabase.auth.getUser();
+    if (!u.user) {
+      setJoining(false);
+      router.replace("/login");
+      return;
+    }
+
+    // Zoek pool op invite_code
+    const { data: pool, error: poolErr } = await supabase
+      .from("pools")
+      .select("id,name,invite_code,created_at")
+      .eq("invite_code", code)
+      .maybeSingle();
+
+    if (poolErr) {
+      setJoining(false);
+      setMsg(poolErr.message);
+      return;
+    }
+
+    if (!pool) {
+      setJoining(false);
+      setMsg("Geen pool gevonden met deze code.");
+      return;
+    }
+
+    // Upsert membership
+    const { error: insErr } = await supabase
+      .from("pool_members")
+      .upsert(
+        { pool_id: pool.id, user_id: u.user.id },
+        { onConflict: "pool_id,user_id" }
+      );
+
+    if (insErr) {
+      setJoining(false);
+      setMsg(insErr.message);
+      return;
+    }
+
+    // Reload lijst (simpel: voeg toe in state)
+    setPools((prev) => {
+      const exists = prev.some((p) => p.id === pool.id);
+      if (exists) return prev;
+      return [pool as PoolRow, ...prev];
+    });
+
+    setJoinCode("");
+    setJoining(false);
+
+    // Direct naar pool
+    router.push(`/pools/${pool.id}`);
+  }
+
+  return (
+    <main style={{ padding: 16, maxWidth: 900 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
+        <div>
+          <h1 style={{ margin: 0 }}>Mijn pools</h1>
+          <p style={{ marginTop: 6, opacity: 0.8 }}>Ingelogd als: {email || "-"}</p>
+        </div>
+        <button onClick={logout}>Logout</button>
+      </div>
 
       {msg && <p style={{ color: "crimson" }}>{msg}</p>}
 
-      <h2 style={{ marginTop: 24 }}>Pools</h2>
+      <hr style={{ margin: "16px 0" }} />
+
+      {/* Blikvanger: join */}
+      <section
+        style={{
+          border: "1px solid #ddd",
+          borderRadius: 14,
+          padding: 16,
+          background: "white",
+          boxShadow: "0 6px 18px rgba(0,0,0,0.06)",
+        }}
+      >
+        <h2 style={{ marginTop: 0, marginBottom: 8 }}>Join een pool</h2>
+        <p style={{ marginTop: 0, opacity: 0.8 }}>
+          Vul een invite code in (je kunt alleen joinen met een geldige code).
+        </p>
+
+        <div style={{ display: "flex", gap: 10, alignItems: "center", maxWidth: 520 }}>
+          <input
+            value={joinCode}
+            onChange={(e) => setJoinCode(e.target.value)}
+            placeholder="Invite code (bv. 464BD22026)"
+            style={{
+              flex: 1,
+              padding: "10px 12px",
+              borderRadius: 10,
+              border: "1px solid #ccc",
+              fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+              letterSpacing: 0.5,
+            }}
+          />
+          <button onClick={joinPool} disabled={joining} style={{ padding: "10px 12px", borderRadius: 10 }}>
+            {joining ? "Joining…" : "Join"}
+          </button>
+        </div>
+      </section>
+
+      <h2 style={{ marginTop: 24 }}>Jouw pools</h2>
 
       {loading ? (
         <p>Loading…</p>
       ) : pools.length === 0 ? (
-        <p>Nog geen pools.</p>
+        <p style={{ opacity: 0.8 }}>
+          Je zit nog in geen enkele pool. Gebruik hierboven een invite code om te joinen.
+        </p>
       ) : (
         <ul style={{ paddingLeft: 18 }}>
           {pools.map((p) => (
-            <li key={p.id}>
-              {/* ✅ belangrijk: altijd p.id */}
+            <li key={p.id} style={{ marginBottom: 6 }}>
               <Link href={`/pools/${p.id}`}>{p.name}</Link>
             </li>
           ))}
