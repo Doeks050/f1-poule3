@@ -9,6 +9,7 @@ import LeaderboardPanel from "./LeaderboardPanel";
 type PoolRow = {
   id: string;
   name: string;
+  invite_code?: string;
   created_at?: string;
 };
 
@@ -94,7 +95,7 @@ export default function PoolDetailPage() {
 
   const isUuid = useMemo(() => {
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-      poolId
+      poolId,
     );
   }, [poolId]);
 
@@ -119,7 +120,7 @@ export default function PoolDetailPage() {
       // ✅ Pool ophalen
       const { data: poolRow, error: poolErr } = await supabase
         .from("pools")
-        .select("id,name,created_at")
+        .select("id,name,invite_code,created_at")
         .eq("id", poolId)
         .maybeSingle();
 
@@ -155,7 +156,9 @@ export default function PoolDetailPage() {
       // ✅ Hero: eerstvolgende open sessie (lock_at in de toekomst)
       const { data: ns, error: nsErr } = await supabase
         .from("event_sessions")
-        .select("id,event_id,session_key,name,starts_at,lock_at,events(id,name,format,starts_at)")
+        .select(
+          "id,event_id,session_key,name,starts_at,lock_at,events(id,name,format,starts_at)",
+        )
         .gt("lock_at", new Date().toISOString())
         .order("lock_at", { ascending: true })
         .limit(1);
@@ -164,7 +167,9 @@ export default function PoolDetailPage() {
         // hero is nice-to-have: niet hard falen
         setNextSession(null);
       } else {
-        const row = (ns && ns.length > 0 ? (ns[0] as any) : null) as NextSessionRow | null;
+        const row = (
+          ns && ns.length > 0 ? (ns[0] as any) : null
+        ) as NextSessionRow | null;
         setNextSession(row);
       }
 
@@ -177,7 +182,9 @@ export default function PoolDetailPage() {
     if (nextSession?.event_id) return nextSession.event_id;
     // fallback: eerstvolgende event op starts_at
     const t = Date.now();
-    const upcoming = events.find((e) => (e.starts_at ? new Date(e.starts_at).getTime() : 0) > t);
+    const upcoming = events.find(
+      (e) => (e.starts_at ? new Date(e.starts_at).getTime() : 0) > t,
+    );
     return upcoming?.id ?? null;
   }, [nextSession?.event_id, events]);
 
@@ -201,6 +208,23 @@ export default function PoolDetailPage() {
       href,
     };
   }, [nextSession, now, poolId]);
+
+  const inviteLink = useMemo(() => {
+    if (!pool?.invite_code) return "";
+    const origin = typeof window !== "undefined" ? window.location.origin : "";
+    return `${origin}/join?code=${pool.invite_code}`;
+  }, [pool?.invite_code]);
+
+  async function copyInvite() {
+    try {
+      if (!inviteLink) return;
+      await navigator.clipboard.writeText(inviteLink);
+      setMsg("✅ Invite link gekopieerd.");
+      setTimeout(() => setMsg(null), 1500);
+    } catch {
+      setMsg("Kon niet kopiëren. Kopieer handmatig.");
+    }
+  }
 
   if (loading) {
     return (
@@ -231,7 +255,14 @@ export default function PoolDetailPage() {
           boxShadow: "0 6px 18px rgba(0,0,0,0.06)",
         }}
       >
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            gap: 12,
+            flexWrap: "wrap",
+          }}
+        >
           <div>
             <div style={{ fontSize: 12, opacity: 0.75 }}>Next up</div>
             <div style={{ fontSize: 22, fontWeight: 800, marginTop: 4 }}>
@@ -242,9 +273,12 @@ export default function PoolDetailPage() {
                 <>
                   <div style={{ fontWeight: 700 }}>{hero.sessionTitle}</div>
                   <div style={{ marginTop: 4 }}>
-                    🔓 Lock in <strong>{hero.lockIn}</strong> (om {hero.lockAtLocal})
+                    🔓 Lock in <strong>{hero.lockIn}</strong> (om{" "}
+                    {hero.lockAtLocal})
                   </div>
-                  <div style={{ marginTop: 4, fontSize: 12, opacity: 0.8 }}>{hero.formatLabel}</div>
+                  <div style={{ marginTop: 4, fontSize: 12, opacity: 0.8 }}>
+                    {hero.formatLabel}
+                  </div>
                 </>
               ) : (
                 <div style={{ marginTop: 6, opacity: 0.85 }}>
@@ -255,10 +289,17 @@ export default function PoolDetailPage() {
           </div>
 
           <div style={{ marginTop: 18 }}>
-          <LeaderboardPanel poolId={poolId} />
+            <LeaderboardPanel poolId={poolId} />
           </div>
 
-          <div style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "flex-end" }}>
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 10,
+              alignItems: "flex-end",
+            }}
+          >
             {hero ? (
               <>
                 <Link href={hero.href} style={{ textDecoration: "underline" }}>
@@ -283,6 +324,60 @@ export default function PoolDetailPage() {
           </div>
         </div>
       </div>
+      <div
+        style={{
+          border: "1px solid #ddd",
+          borderRadius: 12,
+          padding: 14,
+          marginTop: 14,
+          background: "white",
+        }}
+      >
+        <div style={{ fontWeight: 800, marginBottom: 6 }}>Invite</div>
+
+        <div style={{ display: "grid", gap: 8 }}>
+          <div style={{ fontSize: 13, opacity: 0.8 }}>
+            Invite code: <strong>{pool?.invite_code ?? "-"}</strong>
+          </div>
+
+          <div style={{ fontSize: 13, opacity: 0.8 }}>
+            Invite link:
+            <div style={{ marginTop: 4 }}>
+              <code
+                style={{
+                  display: "inline-block",
+                  padding: "6px 8px",
+                  border: "1px solid #eee",
+                  borderRadius: 8,
+                }}
+              >
+                {inviteLink || "(geen link)"}
+              </code>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <button
+              onClick={copyInvite}
+              style={{ padding: "8px 12px", borderRadius: 10 }}
+            >
+              Copy invite link
+            </button>
+
+            <Link
+              href={`/pools/${poolId}/members`}
+              style={{ textDecoration: "underline", padding: "8px 0" }}
+            >
+              Bekijk members →
+            </Link>
+          </div>
+
+          <div style={{ fontSize: 12, opacity: 0.65 }}>
+            Joinen kan alleen via invite link/code. Bij join is username
+            verplicht (leaderboard naam).
+          </div>
+        </div>
+      </div>
 
       <h2 style={{ marginTop: 24 }}>Events</h2>
 
@@ -294,8 +389,11 @@ export default function PoolDetailPage() {
         <ul style={{ paddingLeft: 18 }}>
           {events.map((e) => {
             const isNext = e.id === nextEventId;
-            const when = e.starts_at ? new Date(e.starts_at).toLocaleString() : "geen datum";
-            const label = e.format === "sprint" ? "Sprint weekend" : "Standaard weekend";
+            const when = e.starts_at
+              ? new Date(e.starts_at).toLocaleString()
+              : "geen datum";
+            const label =
+              e.format === "sprint" ? "Sprint weekend" : "Standaard weekend";
 
             return (
               <li key={e.id} style={{ marginBottom: 10 }}>
