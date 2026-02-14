@@ -27,7 +27,6 @@ type NextSessionRow = {
   name: string;
   starts_at: string;
   lock_at: string;
-  // Supabase returns nested object when selecting relation
   events?: {
     id: string;
     name: string;
@@ -86,6 +85,13 @@ export default function PoolDetailPage() {
   // hero / next session
   const [nextSession, setNextSession] = useState<NextSessionRow | null>(null);
 
+  // owner / role
+  const [myRole, setMyRole] = useState<string | null>(null);
+  const isOwner = myRole === "owner";
+
+  // reset invite loading
+  const [resettingInvite, setResettingInvite] = useState(false);
+
   // live clock for countdown
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -113,32 +119,32 @@ export default function PoolDetailPage() {
 
       const user = userData.user;
 
-if (!poolId || !isUuid) {
-  setMsg(`Pool id ontbreekt of is ongeldig: "${poolId || "leeg"}"`);
-  setLoading(false);
-  return;
-}
+      if (!poolId || !isUuid) {
+        setMsg(`Pool id ontbreekt of is ongeldig: "${poolId || "leeg"}"`);
+        setLoading(false);
+        return;
+      }
 
-// 🔒 Controleer of gebruiker lid is van deze pool
-const { data: membership, error: memErr } = await supabase
-  .from("pool_members")
-  .select("pool_id,user_id")
-  .eq("pool_id", poolId)
-  .eq("user_id", user.id)
-  .maybeSingle();
+      // 🔒 Controleer membership + pak ook role
+      const { data: membership, error: memErr } = await supabase
+        .from("pool_members")
+        .select("pool_id,user_id,role")
+        .eq("pool_id", poolId)
+        .eq("user_id", user.id)
+        .maybeSingle();
 
-if (memErr) {
-  setMsg(memErr.message);
-  setLoading(false);
-  return;
-}
+      if (memErr) {
+        setMsg(memErr.message);
+        setLoading(false);
+        return;
+      }
 
-if (!membership) {
-  // Geen toegang zonder invite
-  router.replace("/pools");
-  return;
-}
+      if (!membership) {
+        router.replace("/pools");
+        return;
+      }
 
+      setMyRole((membership as any)?.role ?? "member");
 
       // ✅ Pool ophalen
       const { data: poolRow, error: poolErr } = await supabase
@@ -187,7 +193,6 @@ if (!membership) {
         .limit(1);
 
       if (nsErr) {
-        // hero is nice-to-have: niet hard falen
         setNextSession(null);
       } else {
         const row = (
@@ -203,7 +208,6 @@ if (!membership) {
   // highlight event: event van de nextSession (bron van waarheid)
   const nextEventId = useMemo(() => {
     if (nextSession?.event_id) return nextSession.event_id;
-    // fallback: eerstvolgende event op starts_at
     const t = Date.now();
     const upcoming = events.find(
       (e) => (e.starts_at ? new Date(e.starts_at).getTime() : 0) > t,
@@ -249,6 +253,64 @@ if (!membership) {
     }
   }
 
+  async function resetInviteCode() {
+    setMsg(null);
+
+    if (!poolId || !isUuid) {
+      setMsg("Ongeldige pool id.");
+      return;
+    }
+    if (!isOwner) {
+      setMsg("Alleen de owner kan de invite code resetten.");
+      return;
+    }
+
+    setResettingInvite(true);
+
+    // token
+    const { data: sessionData } = await supabase.auth.getSession();
+    const token = sessionData.session?.access_token;
+    if (!token) {
+      setResettingInvite(false);
+      router.replace("/login");
+      return;
+    }
+
+    const res = await fetch(`/api/pools/${poolId}/reset-invite`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+      },
+    });
+
+    const raw = await res.text();
+    let json: any = {};
+    try {
+      json = JSON.parse(raw);
+    } catch {}
+
+    if (!res.ok) {
+      setResettingInvite(false);
+      setMsg(`Reset mislukt (status ${res.status}). ${json?.error ?? raw}`.trim());
+      return;
+    }
+
+    const newCode = String(json?.inviteCode ?? "").trim();
+    if (!newCode) {
+      setResettingInvite(false);
+      setMsg("Reset gelukt maar geen inviteCode teruggekregen.");
+      return;
+    }
+
+    // update lokaal
+    setPool((prev) => (prev ? { ...prev, invite_code: newCode } : prev));
+    setMsg("✅ Invite code gereset.");
+    setTimeout(() => setMsg(null), 1500);
+
+    setResettingInvite(false);
+  }
+
   if (loading) {
     return (
       <main style={{ padding: 16 }}>
@@ -265,7 +327,12 @@ if (!membership) {
 
       <h1 style={{ marginBottom: 8 }}>{pool?.name ?? "Pool"}</h1>
 
-      <Link href={`/pools/${poolId}/members`}>Members</Link>
+      <div style={{ display: "flex", gap: 14, alignItems: "baseline" }}>
+        <Link href={`/pools/${poolId}/members`}>Members</Link>
+        <span style={{ fontSize: 12, opacity: 0.65 }}>
+          Jouw rol: <strong>{myRole ?? "-"}</strong>
+        </span>
+      </div>
 
       {msg && <p style={{ color: "crimson" }}>{msg}</p>}
 
@@ -349,6 +416,8 @@ if (!membership) {
           </div>
         </div>
       </div>
+
+      {/* INVITE */}
       <div
         style={{
           border: "1px solid #ddd",
@@ -381,14 +450,26 @@ if (!membership) {
             </div>
           </div>
 
-         <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 8 }}>
-         <button onClick={copyInvite}>Copy invite link</button>
-         </div>
+          <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 8 }}>
+            <button onClick={copyInvite}>Copy invite link</button>
+
+            {isOwner ? (
+              <button onClick={resetInviteCode} disabled={resettingInvite}>
+                {resettingInvite ? "Resetting…" : "Reset invite code"}
+              </button>
+            ) : null}
+          </div>
 
           <div style={{ fontSize: 12, opacity: 0.65 }}>
-            Joinen kan alleen via invite link/code. Bij join is username
-            verplicht (leaderboard naam).
+            Joinen kan alleen via invite link/code. Bij join is username verplicht
+            (leaderboard naam).
           </div>
+
+          {isOwner ? (
+            <div style={{ fontSize: 12, opacity: 0.65 }}>
+              Als owner kun je de invite code resetten (oude links werken dan niet meer).
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -405,8 +486,7 @@ if (!membership) {
             const when = e.starts_at
               ? new Date(e.starts_at).toLocaleString()
               : "geen datum";
-            const label =
-              e.format === "sprint" ? "Sprint weekend" : "Standaard weekend";
+            const label = e.format === "sprint" ? "Sprint weekend" : "Standaard weekend";
 
             return (
               <li key={e.id} style={{ marginBottom: 10 }}>
