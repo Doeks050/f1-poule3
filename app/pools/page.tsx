@@ -27,76 +27,78 @@ export default function PoolsPage() {
     return (v ?? "").trim().toUpperCase();
   }
 
-  useEffect(() => {
-    (async () => {
-      setLoading(true);
-      setMsg(null);
+  async function loadPools() {
+    setLoading(true);
+    setMsg(null);
 
-      const { data } = await supabase.auth.getUser();
-      if (!data.user) {
-        router.replace("/login");
-        return;
-      }
+    const { data } = await supabase.auth.getUser();
+    if (!data.user) {
+      router.replace("/login");
+      return;
+    }
 
-      const user = data.user;
-      setEmail(user.email ?? "");
+    const user = data.user;
+    setEmail(user.email ?? "");
 
-      // 1) Username gate
-      const { data: prof, error: profErr } = await supabase
-        .from("profiles")
-        .select("display_name")
-        .eq("id", user.id)
-        .maybeSingle();
+    // 1) Username gate
+    const { data: prof, error: profErr } = await supabase
+      .from("profiles")
+      .select("display_name")
+      .eq("id", user.id)
+      .maybeSingle();
 
-      if (profErr) {
-        setMsg(profErr.message);
-        setLoading(false);
-        return;
-      }
-
-      if (!prof?.display_name) {
-        router.replace("/onboarding/username");
-        return;
-      }
-
-      // 2) Alleen pools waar je member bent (GEEN fallback naar alle pools)
-      // We halen eerst pool_ids uit pool_members, en daarna pools op.
-      const { data: memberRows, error: mErr } = await supabase
-        .from("pool_members")
-        .select("pool_id")
-        .eq("user_id", user.id);
-
-      if (mErr) {
-        setMsg(mErr.message);
-        setPools([]);
-        setLoading(false);
-        return;
-      }
-
-      const poolIds = (memberRows ?? []).map((r: any) => r.pool_id).filter(Boolean);
-
-      if (poolIds.length === 0) {
-        setPools([]);
-        setLoading(false);
-        return;
-      }
-
-      const { data: poolRows, error: pErr } = await supabase
-        .from("pools")
-        .select("id,name,invite_code,created_at")
-        .in("id", poolIds)
-        .order("created_at", { ascending: false });
-
-      if (pErr) {
-        setMsg(pErr.message);
-        setPools([]);
-        setLoading(false);
-        return;
-      }
-
-      setPools((poolRows ?? []) as PoolRow[]);
+    if (profErr) {
+      setMsg(profErr.message);
       setLoading(false);
-    })();
+      return;
+    }
+
+    if (!prof?.display_name) {
+      router.replace("/onboarding/username");
+      return;
+    }
+
+    // 2) Alleen pools waar je member bent
+    const { data: memberRows, error: mErr } = await supabase
+      .from("pool_members")
+      .select("pool_id")
+      .eq("user_id", user.id);
+
+    if (mErr) {
+      setMsg(mErr.message);
+      setPools([]);
+      setLoading(false);
+      return;
+    }
+
+    const poolIds = (memberRows ?? []).map((r: any) => r.pool_id).filter(Boolean);
+
+    if (poolIds.length === 0) {
+      setPools([]);
+      setLoading(false);
+      return;
+    }
+
+    const { data: poolRows, error: pErr } = await supabase
+      .from("pools")
+      .select("id,name,invite_code,created_at")
+      .in("id", poolIds)
+      .order("created_at", { ascending: false });
+
+    if (pErr) {
+      setMsg(pErr.message);
+      setPools([]);
+      setLoading(false);
+      return;
+    }
+
+    setPools((poolRows ?? []) as PoolRow[]);
+    setLoading(false);
+  }
+
+  useEffect(() => {
+    loadPools();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router]);
 
   async function logout() {
@@ -115,58 +117,58 @@ export default function PoolsPage() {
 
     setJoining(true);
 
-    const { data: u } = await supabase.auth.getUser();
-    if (!u.user) {
+    // Token ophalen (voor API auth)
+    const { data: sessionData } = await supabase.auth.getSession();
+    const token = sessionData.session?.access_token;
+
+    if (!token) {
       setJoining(false);
+      setMsg("Geen session token. Log opnieuw in.");
       router.replace("/login");
       return;
     }
 
-    // Zoek pool op invite_code
-    const { data: pool, error: poolErr } = await supabase
-      .from("pools")
-      .select("id,name,invite_code,created_at")
-      .eq("invite_code", code)
-      .maybeSingle();
+    try {
+      const res = await fetch("/api/pools/join", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ code }),
+      });
 
-    if (poolErr) {
+      const json = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        setJoining(false);
+        setMsg(json?.error ?? "Join mislukt.");
+        return;
+      }
+
+      const pool = json?.pool as { id: string; name: string } | undefined;
+      if (!pool?.id) {
+        setJoining(false);
+        setMsg("Join gelukt, maar geen pool teruggekregen.");
+        return;
+      }
+
+      // Update UI (zodat hij meteen zichtbaar is)
+      setPools((prev) => {
+        const exists = prev.some((p) => p.id === pool.id);
+        if (exists) return prev;
+        return [{ id: pool.id, name: pool.name } as PoolRow, ...prev];
+      });
+
+      setJoinCode("");
       setJoining(false);
-      setMsg(poolErr.message);
-      return;
-    }
 
-    if (!pool) {
+      // Door naar pool
+      router.push(`/pools/${pool.id}`);
+    } catch (e: any) {
       setJoining(false);
-      setMsg("Geen pool gevonden met deze code.");
-      return;
+      setMsg(e?.message ?? "Onbekende fout bij join.");
     }
-
-    // Upsert membership
-    const { error: insErr } = await supabase
-      .from("pool_members")
-      .upsert(
-        { pool_id: pool.id, user_id: u.user.id },
-        { onConflict: "pool_id,user_id" }
-      );
-
-    if (insErr) {
-      setJoining(false);
-      setMsg(insErr.message);
-      return;
-    }
-
-    // Reload lijst (simpel: voeg toe in state)
-    setPools((prev) => {
-      const exists = prev.some((p) => p.id === pool.id);
-      if (exists) return prev;
-      return [pool as PoolRow, ...prev];
-    });
-
-    setJoinCode("");
-    setJoining(false);
-
-    // Direct naar pool
-    router.push(`/pools/${pool.id}`);
   }
 
   return (
