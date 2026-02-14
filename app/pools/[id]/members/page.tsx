@@ -7,17 +7,13 @@ import { supabase } from "../../../../lib/supabaseClient";
 
 type MemberRow = {
   user_id: string;
+  display_name: string | null;
   created_at?: string;
 };
 
 type PoolRow = {
   id: string;
   name: string;
-};
-
-type ProfileRow = {
-  id: string;
-  display_name: string;
 };
 
 export default function MembersPage() {
@@ -27,10 +23,8 @@ export default function MembersPage() {
 
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState<string | null>(null);
-
   const [pool, setPool] = useState<PoolRow | null>(null);
   const [members, setMembers] = useState<MemberRow[]>([]);
-  const [profilesById, setProfilesById] = useState<Record<string, ProfileRow>>({});
 
   const isUuid = useMemo(() => {
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(poolId);
@@ -54,19 +48,19 @@ export default function MembersPage() {
       }
       const user = u.user;
 
-      // 2) username gate
-      const { data: prof, error: profErr } = await supabase
+      // 2) username gate (jouw eigen profiel moet een display_name hebben)
+      const { data: myProf, error: myProfErr } = await supabase
         .from("profiles")
         .select("display_name")
         .eq("id", user.id)
         .maybeSingle();
 
-      if (profErr) {
-        setMsg(profErr.message);
+      if (myProfErr) {
+        setMsg(myProfErr.message);
         setLoading(false);
         return;
       }
-      if (!prof?.display_name) {
+      if (!myProf?.display_name) {
         router.replace("/onboarding/username");
         return;
       }
@@ -78,7 +72,7 @@ export default function MembersPage() {
         return;
       }
 
-      // 4) membership check (invite-only)
+      // 4) membership check (je moet member zijn om members te zien)
       const { data: membership, error: memErr } = await supabase
         .from("pool_members")
         .select("pool_id,user_id")
@@ -110,10 +104,10 @@ export default function MembersPage() {
       }
       setPool((p ?? null) as PoolRow | null);
 
-      // 6) members lijst
+      // 6) members lijst + display_name DIRECT uit pool_members
       const { data: m, error: mErr } = await supabase
         .from("pool_members")
-        .select("user_id,created_at")
+        .select("user_id,display_name,created_at")
         .eq("pool_id", poolId)
         .order("created_at", { ascending: true });
 
@@ -123,34 +117,7 @@ export default function MembersPage() {
         return;
       }
 
-      const list = (m ?? []) as MemberRow[];
-      setMembers(list);
-
-      // 7) haal display_names uit profiles
-      const ids = Array.from(new Set(list.map((x) => x.user_id))).filter(Boolean);
-
-      if (ids.length === 0) {
-        setProfilesById({});
-        setLoading(false);
-        return;
-      }
-
-      const { data: pr, error: prErr } = await supabase
-        .from("profiles")
-        .select("id,display_name")
-        .in("id", ids);
-
-      if (prErr) {
-        // Niet hard failen; we tonen dan fallback
-        setProfilesById({});
-        setLoading(false);
-        return;
-      }
-
-      const map: Record<string, ProfileRow> = {};
-      for (const row of (pr ?? []) as ProfileRow[]) map[row.id] = row;
-      setProfilesById(map);
-
+      setMembers((m ?? []) as MemberRow[]);
       setLoading(false);
     })();
   }, [router, poolId, isUuid]);
@@ -171,7 +138,7 @@ export default function MembersPage() {
       ) : (
         <ul style={{ paddingLeft: 18 }}>
           {members.map((m, idx) => {
-            const dn = profilesById[m.user_id]?.display_name?.trim();
+            const dn = (m.display_name ?? "").trim();
             return (
               <li key={`${m.user_id}_${idx}`} style={{ marginBottom: 8 }}>
                 <strong>#{idx + 1}</strong> — {dn ? dn : "(geen username)"}{" "}
