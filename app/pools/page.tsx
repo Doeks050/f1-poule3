@@ -117,85 +117,61 @@ export default function PoolsPage() {
 
   setJoining(true);
 
-  // session token
+  // token + user
   const { data: sessionData } = await supabase.auth.getSession();
   const token = sessionData.session?.access_token;
 
-  if (!token) {
-    setJoining(false);
-    setMsg("Geen session token. Log opnieuw in.");
-    router.replace("/login");
-    return;
-  }
-
-  // user + display name
   const { data: u } = await supabase.auth.getUser();
-  if (!u.user) {
+  const user = u.user;
+
+  if (!user || !token) {
     setJoining(false);
     router.replace("/login");
     return;
   }
 
-  const { data: prof, error: profErr } = await supabase
-    .from("profiles")
-    .select("display_name")
-    .eq("id", u.user.id)
-    .maybeSingle();
+  // ✅ Server join route (POST)
+  const res = await fetch("/api/join", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ inviteCode: code }),
+  });
 
-  if (profErr) {
-    setJoining(false);
-    setMsg(`profiles error: ${profErr.message}`);
-    return;
-  }
-
-  const displayName = (prof?.display_name ?? "").trim();
-  if (!displayName) {
-    setJoining(false);
-    router.replace("/onboarding/username");
-    return;
-  }
-
+  const raw = await res.text();
+  let json: any = {};
   try {
-    const res = await fetch("/api/pools/join", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ inviteCode: code, displayName }),
-    });
+    json = JSON.parse(raw);
+  } catch {}
 
-    const text = await res.text(); // <-- belangrijk
-    let json: any = null;
-    try {
-      json = JSON.parse(text);
-    } catch {
-      // niet-json response (bv HTML bij 500)
-    }
-
-    if (!res.ok) {
-      setJoining(false);
-      setMsg(
-        `Join mislukt (status ${res.status}). ` +
-          (json?.error ? `Error: ${json.error}` : `Raw: ${text.slice(0, 200)}`)
-      );
-      return;
-    }
-
-    const poolId = json?.poolId as string | undefined;
-    if (!poolId) {
-      setJoining(false);
-      setMsg(`Join ok maar geen poolId. Raw: ${text.slice(0, 200)}`);
-      return;
-    }
-
-    setJoinCode("");
+  if (!res.ok) {
     setJoining(false);
-    router.push(`/pools/${poolId}`);
-  } catch (e: any) {
-    setJoining(false);
-    setMsg(`Join request failed: ${e?.message ?? "unknown error"}`);
+    setMsg(`Join mislukt (status ${res.status}). ${json?.error ?? raw}`.trim());
+    return;
   }
+
+  const poolId = json?.poolId as string | undefined;
+  const poolName = json?.poolName as string | undefined;
+
+  if (!poolId) {
+    setJoining(false);
+    setMsg("Join gelukt maar geen poolId teruggekregen.");
+    return;
+  }
+
+  // Update lijst
+  setPools((prev) => {
+    const exists = prev.some((p) => p.id === poolId);
+    if (exists) return prev;
+    return [{ id: poolId, name: poolName ?? "Pool" }, ...prev];
+  });
+
+  setJoinCode("");
+  setJoining(false);
+
+  router.push(`/pools/${poolId}`)
 }
 
   return (
