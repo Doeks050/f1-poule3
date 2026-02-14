@@ -117,7 +117,7 @@ export default function PoolsPage() {
 
   setJoining(true);
 
-  // 1) session token
+  // session token
   const { data: sessionData } = await supabase.auth.getSession();
   const token = sessionData.session?.access_token;
 
@@ -128,7 +128,7 @@ export default function PoolsPage() {
     return;
   }
 
-  // 2) display name ophalen (uit profiles)
+  // user + display name
   const { data: u } = await supabase.auth.getUser();
   if (!u.user) {
     setJoining(false);
@@ -144,7 +144,7 @@ export default function PoolsPage() {
 
   if (profErr) {
     setJoining(false);
-    setMsg(profErr.message);
+    setMsg(`profiles error: ${profErr.message}`);
     return;
   }
 
@@ -155,7 +155,6 @@ export default function PoolsPage() {
     return;
   }
 
-  // 3) join via server route (service role) -> geen RLS gedoe
   try {
     const res = await fetch("/api/pools/join", {
       method: "POST",
@@ -166,29 +165,36 @@ export default function PoolsPage() {
       body: JSON.stringify({ inviteCode: code, displayName }),
     });
 
-    const json = await res.json().catch(() => ({}));
+    const text = await res.text(); // <-- belangrijk
+    let json: any = null;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      // niet-json response (bv HTML bij 500)
+    }
 
     if (!res.ok) {
       setJoining(false);
-      setMsg(json?.error ?? "Join mislukt.");
+      setMsg(
+        `Join mislukt (status ${res.status}). ` +
+          (json?.error ? `Error: ${json.error}` : `Raw: ${text.slice(0, 200)}`)
+      );
       return;
     }
 
-    const poolId = json.poolId as string;
+    const poolId = json?.poolId as string | undefined;
     if (!poolId) {
       setJoining(false);
-      setMsg("Join gelukt maar geen poolId teruggekregen.");
+      setMsg(`Join ok maar geen poolId. Raw: ${text.slice(0, 200)}`);
       return;
     }
 
     setJoinCode("");
     setJoining(false);
-
-    // naar pool
     router.push(`/pools/${poolId}`);
   } catch (e: any) {
     setJoining(false);
-    setMsg(e?.message ?? "Join mislukt.");
+    setMsg(`Join request failed: ${e?.message ?? "unknown error"}`);
   }
 }
 
