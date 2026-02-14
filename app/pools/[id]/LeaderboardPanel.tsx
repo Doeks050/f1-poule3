@@ -30,7 +30,8 @@ export default function LeaderboardPanel({ poolId }: { poolId: string }) {
     try {
       // ✅ LET OP: jouw route is 'leaderbord' (met d), niet 'leaderboard'
       const res = await fetch(
-        `/api/pools/${poolId}/leaderbord?accessToken=${encodeURIComponent(token)}`
+      `/api/pools/${poolId}/leaderboard?accessToken=${encodeURIComponent(token)}`
+
       );
       const json = await res.json().catch(() => ({}));
 
