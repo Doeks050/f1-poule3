@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { supabaseAdmin } from "../../../lib/supabaseAdmin";
+import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
 
 function getBearerToken(req: Request): string | null {
   const h = req.headers.get("authorization") ?? "";
@@ -20,18 +20,11 @@ async function getUserFromToken(accessToken: string) {
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json().catch(() => null);
+    const body = await req.json().catch(() => ({}));
     const inviteCode = String(body?.inviteCode ?? "").trim().toUpperCase();
-    const displayName = String(body?.displayName ?? "").trim();
 
     if (!inviteCode) {
       return NextResponse.json({ error: "Missing inviteCode" }, { status: 400 });
-    }
-    if (!displayName || displayName.length < 2) {
-      return NextResponse.json(
-        { error: "Display name is required (min 2 chars)" },
-        { status: 400 }
-      );
     }
 
     const accessToken =
@@ -58,7 +51,24 @@ export async function POST(req: Request) {
     if (poolErr) return NextResponse.json({ error: poolErr.message }, { status: 500 });
     if (!pool) return NextResponse.json({ error: "Invalid invite code" }, { status: 404 });
 
-    // 2) Upsert membership (zodat opnieuw joinen niet crasht)
+    // 2) display_name ophalen uit profiles (leidend)
+    const { data: prof, error: profErr } = await admin
+      .from("profiles")
+      .select("display_name")
+      .eq("id", user.id)
+      .maybeSingle();
+
+    if (profErr) return NextResponse.json({ error: profErr.message }, { status: 500 });
+
+    const displayName = String(prof?.display_name ?? "").trim();
+    if (!displayName || displayName.length < 2) {
+      return NextResponse.json(
+        { error: "Je hebt nog geen username. Ga eerst naar onboarding/username." },
+        { status: 400 }
+      );
+    }
+
+    // 3) Upsert membership (invite-only join) + cache display_name in pool_members
     const { error: upErr } = await admin
       .from("pool_members")
       .upsert(
@@ -78,9 +88,6 @@ export async function POST(req: Request) {
       poolName: pool.name,
     });
   } catch (e: any) {
-    return NextResponse.json(
-      { error: e?.message ?? "Unknown error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: e?.message ?? "Unknown error" }, { status: 500 });
   }
 }
