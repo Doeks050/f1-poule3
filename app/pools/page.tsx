@@ -107,69 +107,90 @@ export default function PoolsPage() {
   }
 
   async function joinPool() {
-    setMsg(null);
+  setMsg(null);
 
-    const code = normalizeInviteCode(joinCode);
-    if (!code) {
-      setMsg("Vul een invite code in.");
-      return;
-    }
-
-    setJoining(true);
-
-    // Token ophalen (voor API auth)
-    const { data: sessionData } = await supabase.auth.getSession();
-    const token = sessionData.session?.access_token;
-
-    if (!token) {
-      setJoining(false);
-      setMsg("Geen session token. Log opnieuw in.");
-      router.replace("/login");
-      return;
-    }
-
-    try {
-      const res = await fetch("/api/pools/join", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ inviteCode: code }),
-      });
-
-      const json = await res.json().catch(() => ({}));
-
-      if (!res.ok) {
-        setJoining(false);
-        setMsg(json?.error ?? "Join mislukt.");
-        return;
-      }
-
-      const pool = json?.pool as { id: string; name: string } | undefined;
-      if (!pool?.id) {
-        setJoining(false);
-        setMsg("Join gelukt, maar geen pool teruggekregen.");
-        return;
-      }
-
-      // Update UI (zodat hij meteen zichtbaar is)
-      setPools((prev) => {
-        const exists = prev.some((p) => p.id === pool.id);
-        if (exists) return prev;
-        return [{ id: pool.id, name: pool.name } as PoolRow, ...prev];
-      });
-
-      setJoinCode("");
-      setJoining(false);
-
-      // Door naar pool
-      router.push(`/pools/${pool.id}`);
-    } catch (e: any) {
-      setJoining(false);
-      setMsg(e?.message ?? "Onbekende fout bij join.");
-    }
+  const code = normalizeInviteCode(joinCode);
+  if (!code) {
+    setMsg("Vul een invite code in.");
+    return;
   }
+
+  setJoining(true);
+
+  // 1) session token
+  const { data: sessionData } = await supabase.auth.getSession();
+  const token = sessionData.session?.access_token;
+
+  if (!token) {
+    setJoining(false);
+    setMsg("Geen session token. Log opnieuw in.");
+    router.replace("/login");
+    return;
+  }
+
+  // 2) display name ophalen (uit profiles)
+  const { data: u } = await supabase.auth.getUser();
+  if (!u.user) {
+    setJoining(false);
+    router.replace("/login");
+    return;
+  }
+
+  const { data: prof, error: profErr } = await supabase
+    .from("profiles")
+    .select("display_name")
+    .eq("id", u.user.id)
+    .maybeSingle();
+
+  if (profErr) {
+    setJoining(false);
+    setMsg(profErr.message);
+    return;
+  }
+
+  const displayName = (prof?.display_name ?? "").trim();
+  if (!displayName) {
+    setJoining(false);
+    router.replace("/onboarding/username");
+    return;
+  }
+
+  // 3) join via server route (service role) -> geen RLS gedoe
+  try {
+    const res = await fetch("/api/pools/join", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ inviteCode: code, displayName }),
+    });
+
+    const json = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      setJoining(false);
+      setMsg(json?.error ?? "Join mislukt.");
+      return;
+    }
+
+    const poolId = json.poolId as string;
+    if (!poolId) {
+      setJoining(false);
+      setMsg("Join gelukt maar geen poolId teruggekregen.");
+      return;
+    }
+
+    setJoinCode("");
+    setJoining(false);
+
+    // naar pool
+    router.push(`/pools/${poolId}`);
+  } catch (e: any) {
+    setJoining(false);
+    setMsg(e?.message ?? "Join mislukt.");
+  }
+}
 
   return (
     <main style={{ padding: 16, maxWidth: 900 }}>
