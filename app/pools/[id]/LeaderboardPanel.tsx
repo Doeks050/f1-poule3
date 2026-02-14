@@ -5,6 +5,7 @@ import { supabase } from "../../../lib/supabaseClient";
 
 type LeaderboardRow = {
   user_id: string;
+  display_name?: string | null;
   total_points: number;
 };
 
@@ -27,8 +28,9 @@ export default function LeaderboardPanel({ poolId }: { poolId: string }) {
     }
 
     try {
+      // ✅ LET OP: jouw route is 'leaderbord' (met d), niet 'leaderboard'
       const res = await fetch(
-        `/api/pools/${poolId}/leaderboard?accessToken=${encodeURIComponent(token)}`
+        `/api/pools/${poolId}/leaderbord?accessToken=${encodeURIComponent(token)}`
       );
       const json = await res.json().catch(() => ({}));
 
@@ -73,19 +75,25 @@ export default function LeaderboardPanel({ poolId }: { poolId: string }) {
         </p>
       ) : (
         <ol style={{ paddingLeft: 18, marginTop: 10 }}>
-          {rows.slice(0, 15).map((r) => (
-            <li key={r.user_id} style={{ marginBottom: 6 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                <span style={{ fontFamily: "monospace" }}>{r.user_id.slice(0, 8)}…</span>
-                <strong>{r.total_points}</strong>
-              </div>
-            </li>
-          ))}
+          {rows.slice(0, 15).map((r) => {
+            const name =
+              (r.display_name ?? "").trim() ||
+              `${r.user_id.slice(0, 8)}…`;
+
+            return (
+              <li key={r.user_id} style={{ marginBottom: 6 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                  <span>{name}</span>
+                  <strong>{r.total_points}</strong>
+                </div>
+              </li>
+            );
+          })}
         </ol>
       )}
 
       <p style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
-        (Later vervangen we user_id door naam/email via profiles of pool_members display_name.)
+        (Leaderboard naam komt nu uit <code>pool_members.display_name</code>.)
       </p>
     </section>
   );
