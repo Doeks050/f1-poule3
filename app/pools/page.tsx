@@ -135,7 +135,7 @@ export default function PoolsPage() {
           "content-type": "application/json",
           authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ code }),
+        body: JSON.stringify({ inviteCode: code }),
       });
 
       const json = await res.json().catch(() => ({}));
