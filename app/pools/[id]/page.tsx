@@ -430,11 +430,17 @@ export default function PoolDetailPage() {
       <h1 style={{ marginBottom: 8 }}>{pool?.name ?? "Pool"}</h1>
 
       <div style={{ display: "flex", gap: 14, alignItems: "baseline" }}>
-        <Link href={`/pools/${poolId}/members`}>Members</Link>
-        <span style={{ fontSize: 12, opacity: 0.65 }}>
-          Jouw rol: <strong>{myRole ?? "-"}</strong>
-        </span>
-      </div>
+  <Link href={`/pools/${poolId}/members`}>Members</Link>
+
+  <span style={{ opacity: 0.5 }}>•</span>
+
+  <Link href={`/pools/${poolId}/rules`}>Regels & scoring</Link>
+
+  <span style={{ fontSize: 12, opacity: 0.65 }}>
+    Jouw rol: <strong>{myRole ?? "-"}</strong>
+  </span>
+</div>
+
 
       {msg && <p style={{ color: "crimson" }}>{msg}</p>}
 
