@@ -81,8 +81,6 @@ export default function PoolDetailPage() {
 
   const [pool, setPool] = useState<PoolRow | null>(null);
   const [events, setEvents] = useState<EventRow[]>([]);
-
-  // hero / next session
   const [nextSession, setNextSession] = useState<NextSessionRow | null>(null);
 
   // owner / role
@@ -91,6 +89,13 @@ export default function PoolDetailPage() {
 
   // reset invite loading
   const [resettingInvite, setResettingInvite] = useState(false);
+
+  // rename state
+  const [renaming, setRenaming] = useState(false);
+  const [nameInput, setNameInput] = useState("");
+
+  // delete state
+  const [deleting, setDeleting] = useState(false);
 
   // live clock for countdown
   const [now, setNow] = useState(() => Date.now());
@@ -166,8 +171,9 @@ export default function PoolDetailPage() {
       }
 
       setPool(poolRow as PoolRow);
+      setNameInput(String((poolRow as any)?.name ?? ""));
 
-      // ✅ Events ophalen (globaal, uit jouw import)
+      // ✅ Events ophalen (globaal)
       const { data: evRows, error: evErr } = await supabase
         .from("events")
         .select("id,name,starts_at,format")
@@ -195,9 +201,7 @@ export default function PoolDetailPage() {
       if (nsErr) {
         setNextSession(null);
       } else {
-        const row = (
-          ns && ns.length > 0 ? (ns[0] as any) : null
-        ) as NextSessionRow | null;
+        const row = (ns && ns.length > 0 ? (ns[0] as any) : null) as NextSessionRow | null;
         setNextSession(row);
       }
 
@@ -267,7 +271,6 @@ export default function PoolDetailPage() {
 
     setResettingInvite(true);
 
-    // token
     const { data: sessionData } = await supabase.auth.getSession();
     const token = sessionData.session?.access_token;
     if (!token) {
@@ -303,12 +306,111 @@ export default function PoolDetailPage() {
       return;
     }
 
-    // update lokaal
     setPool((prev) => (prev ? { ...prev, invite_code: newCode } : prev));
     setMsg("✅ Invite code gereset.");
     setTimeout(() => setMsg(null), 1500);
 
     setResettingInvite(false);
+  }
+
+  async function renamePool() {
+    setMsg(null);
+
+    if (!poolId || !isUuid) {
+      setMsg("Ongeldige pool id.");
+      return;
+    }
+    if (!isOwner) {
+      setMsg("Alleen de owner kan de pool hernoemen.");
+      return;
+    }
+
+    const newName = String(nameInput ?? "").trim();
+    if (newName.length < 2) {
+      setMsg("Pool naam moet minimaal 2 tekens zijn.");
+      return;
+    }
+
+    setRenaming(true);
+
+    const { data: sessionData } = await supabase.auth.getSession();
+    const token = sessionData.session?.access_token;
+    if (!token) {
+      setRenaming(false);
+      router.replace("/login");
+      return;
+    }
+
+    const res = await fetch(`/api/pools/${poolId}/rename`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ name: newName }),
+    });
+
+    const raw = await res.text();
+    let json: any = {};
+    try {
+      json = JSON.parse(raw);
+    } catch {}
+
+    if (!res.ok) {
+      setRenaming(false);
+      setMsg(`Hernoemen mislukt (status ${res.status}). ${json?.error ?? raw}`.trim());
+      return;
+    }
+
+    setPool((prev) => (prev ? { ...prev, name: newName } : prev));
+    setMsg("✅ Pool hernoemd.");
+    setTimeout(() => setMsg(null), 1500);
+
+    setRenaming(false);
+  }
+
+  async function deletePool() {
+    setMsg(null);
+
+    if (!poolId || !isUuid) {
+      setMsg("Ongeldige pool id.");
+      return;
+    }
+    if (!isOwner) {
+      setMsg("Alleen de owner kan de pool verwijderen.");
+      return;
+    }
+
+    setDeleting(true);
+
+    const { data: sessionData } = await supabase.auth.getSession();
+    const token = sessionData.session?.access_token;
+    if (!token) {
+      setDeleting(false);
+      router.replace("/login");
+      return;
+    }
+
+    const res = await fetch(`/api/pools/${poolId}/delete`, {
+      method: "DELETE",
+      headers: {
+        authorization: `Bearer ${token}`,
+      },
+    });
+
+    const raw = await res.text();
+    let json: any = {};
+    try {
+      json = JSON.parse(raw);
+    } catch {}
+
+    if (!res.ok) {
+      setDeleting(false);
+      setMsg(`Verwijderen mislukt (status ${res.status}). ${json?.error ?? raw}`.trim());
+      return;
+    }
+
+    router.replace("/pools");
   }
 
   if (loading) {
@@ -365,8 +467,7 @@ export default function PoolDetailPage() {
                 <>
                   <div style={{ fontWeight: 700 }}>{hero.sessionTitle}</div>
                   <div style={{ marginTop: 4 }}>
-                    🔓 Lock in <strong>{hero.lockIn}</strong> (om{" "}
-                    {hero.lockAtLocal})
+                    🔓 Lock in <strong>{hero.lockIn}</strong> (om {hero.lockAtLocal})
                   </div>
                   <div style={{ marginTop: 4, fontSize: 12, opacity: 0.8 }}>
                     {hero.formatLabel}
@@ -461,17 +562,70 @@ export default function PoolDetailPage() {
           </div>
 
           <div style={{ fontSize: 12, opacity: 0.65 }}>
-            Joinen kan alleen via invite link/code. Bij join is username verplicht
-            (leaderboard naam).
+            Joinen kan alleen via invite link/code. Bij join is username verplicht (leaderboard naam).
           </div>
-
-          {isOwner ? (
-            <div style={{ fontSize: 12, opacity: 0.65 }}>
-              Als owner kun je de invite code resetten (oude links werken dan niet meer).
-            </div>
-          ) : null}
         </div>
       </div>
+
+      {/* OWNER TOOLS */}
+      {isOwner ? (
+        <div
+          style={{
+            border: "1px solid #ddd",
+            borderRadius: 12,
+            padding: 14,
+            marginTop: 14,
+            background: "white",
+          }}
+        >
+          <div style={{ fontWeight: 800, marginBottom: 10 }}>Owner tools</div>
+
+          {/* Rename */}
+          <div style={{ display: "grid", gap: 8, maxWidth: 520 }}>
+            <div style={{ fontSize: 13, opacity: 0.8 }}>Pool hernoemen</div>
+            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <input
+                value={nameInput}
+                onChange={(e) => setNameInput(e.target.value)}
+                placeholder="Nieuwe pool naam"
+                style={{
+                  flex: 1,
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  border: "1px solid #ccc",
+                }}
+              />
+              <button onClick={renamePool} disabled={renaming} style={{ padding: "10px 12px", borderRadius: 10 }}>
+                {renaming ? "Opslaan…" : "Opslaan"}
+              </button>
+            </div>
+          </div>
+
+          <hr style={{ margin: "14px 0" }} />
+
+          {/* Delete */}
+          <div style={{ display: "grid", gap: 8 }}>
+            <div style={{ fontSize: 13, opacity: 0.8 }}>Pool verwijderen</div>
+            <button
+              onClick={deletePool}
+              disabled={deleting}
+              style={{
+                padding: "10px 12px",
+                borderRadius: 10,
+                border: "1px solid crimson",
+                color: "crimson",
+                fontWeight: 700,
+                width: "fit-content",
+              }}
+            >
+              {deleting ? "Verwijderen…" : "Verwijder pool"}
+            </button>
+            <div style={{ fontSize: 12, opacity: 0.65 }}>
+              Let op: dit verwijdert ook pool_members en predictions van deze pool.
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <h2 style={{ marginTop: 24 }}>Events</h2>
 
@@ -483,9 +637,7 @@ export default function PoolDetailPage() {
         <ul style={{ paddingLeft: 18 }}>
           {events.map((e) => {
             const isNext = e.id === nextEventId;
-            const when = e.starts_at
-              ? new Date(e.starts_at).toLocaleString()
-              : "geen datum";
+            const when = e.starts_at ? new Date(e.starts_at).toLocaleString() : "geen datum";
             const label = e.format === "sprint" ? "Sprint weekend" : "Standaard weekend";
 
             return (
