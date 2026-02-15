@@ -14,24 +14,28 @@ export default function BonusBankPage() {
   const [msg, setMsg] = useState<string | null>(null);
 
   async function load() {
-    const res = await fetch("/api/bonus-questions");
-    const json = await res.json();
-    setQuestions(json.questions ?? []);
-  }
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+
+  const res = await fetch(`/api/bonus-questions?accessToken=${token}`);
+  const json = await res.json();
+  setQuestions(json.questions ?? []);
+}
+
 
   useEffect(() => {
     load();
   }, []);
 
   async function addQuestion() {
-    if (!newQuestion.trim()) return;
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
 
-    setLoading(true);
-    const res = await fetch("/api/bonus-questions", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ question: newQuestion }),
-    });
+  const res = await fetch(`/api/bonus-questions?accessToken=${token}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ question: newQuestion }),
+  });
 
     if (!res.ok) {
       setMsg("Toevoegen mislukt");
@@ -45,11 +49,15 @@ export default function BonusBankPage() {
   }
 
   async function deleteQuestion(id: string) {
-    await fetch(`/api/bonus-questions/${id}`, {
-      method: "DELETE",
-    });
-    await load();
-  }
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+
+  await fetch(`/api/bonus-questions/${id}?accessToken=${token}`, {
+    method: "DELETE",
+  });
+
+  await load();
+}
 
   return (
     <main style={{ padding: 20, maxWidth: 800 }}>
