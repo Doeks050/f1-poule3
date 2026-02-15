@@ -31,13 +31,22 @@ async function assertOwner(admin: ReturnType<typeof supabaseAdmin>, poolId: stri
   return { ok: true as const };
 }
 
-export async function DELETE(
+export async function POST(
   req: Request,
   { params }: { params: { poolId: string } }
 ) {
   try {
     const poolId = String(params.poolId ?? "").trim();
+    const body = await req.json().catch(() => ({}));
+    const name = String(body?.name ?? "").trim();
+
     if (!poolId) return NextResponse.json({ error: "Missing poolId" }, { status: 400 });
+    if (!name || name.length < 2) {
+      return NextResponse.json({ error: "Name must be at least 2 characters" }, { status: 400 });
+    }
+    if (name.length > 60) {
+      return NextResponse.json({ error: "Name too long (max 60)" }, { status: 400 });
+    }
 
     const accessToken =
       getBearerToken(req) || new URL(req.url).searchParams.get("accessToken");
@@ -54,16 +63,17 @@ export async function DELETE(
     const ownerCheck = await assertOwner(admin, poolId, user.id);
     if (!ownerCheck.ok) return NextResponse.json({ error: ownerCheck.error }, { status: 403 });
 
-    // 🔥 Verwijder in veilige volgorde (afhankelijk van jouw schema)
-    // Als sommige tabellen niet bestaan: laat het weten, dan passen we dit aan.
-    await admin.from("event_session_predictions").delete().eq("pool_id", poolId);
-    await admin.from("predictions").delete().eq("pool_id", poolId);
-    await admin.from("pool_members").delete().eq("pool_id", poolId);
+    const { data: updated, error: upErr } = await admin
+      .from("pools")
+      .update({ name })
+      .eq("id", poolId)
+      .select("id,name")
+      .maybeSingle();
 
-    const { error: delPoolErr } = await admin.from("pools").delete().eq("id", poolId);
-    if (delPoolErr) return NextResponse.json({ error: delPoolErr.message }, { status: 500 });
+    if (upErr) return NextResponse.json({ error: upErr.message }, { status: 500 });
+    if (!updated) return NextResponse.json({ error: "Pool not found" }, { status: 404 });
 
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true, poolId: updated.id, name: updated.name });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? "Unknown error" }, { status: 500 });
   }
