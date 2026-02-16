@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { supabase } from "../../../../../lib/supabaseClient";
+import BonusSection from "./BonusSection";
 
 type EventRow = {
   id: string;
