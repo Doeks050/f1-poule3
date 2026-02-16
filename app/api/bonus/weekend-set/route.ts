@@ -175,9 +175,22 @@ export async function GET(req: Request) {
   const lockAt = newSet.lock_at ? new Date(newSet.lock_at).getTime() : null;
   const isLocked = lockAt ? Date.now() >= lockAt : false;
 
-  return NextResponse.json({
-    set: newSet,
-    questions: (q as any).questions,
-    isLocked,
-  });
+  // 7) Haal bestaande antwoorden op voor deze user
+const { data: answerRow, error: ansErr } = await db
+  .from("bonus_weekend_answers")
+  .select("answers, updated_at")
+  .eq("pool_id", poolId)
+  .eq("event_id", eventId)
+  .eq("user_id", userId)
+  .maybeSingle();
+
+if (ansErr) return jsonError(ansErr.message, 500);
+
+return NextResponse.json({
+  set: newSet,
+  questions: (q as any).questions,
+  isLocked,
+  answers: answerRow?.answers ?? {},
+  answersUpdatedAt: answerRow?.updated_at ?? null,
+});
 }
