@@ -1,61 +1,55 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
-import { supabase } from "../../../../../lib/supabaseClient";
+import { supabase } from "../../../../lib/supabaseClient";
 
-export default function BonusSection() {
-  const params = useParams<{ id: string; eventId: string }>();
-  const poolId = params.id;
-  const eventId = params.eventId;
+type BonusSectionProps = {
+  poolId: string;
+  eventId: string;
+};
 
-  const [bonus, setBonus] = useState<any>(null);
-  const [error, setError] = useState<string | null>(null);
+export default function BonusSection({ poolId, eventId }: BonusSectionProps) {
+  const [loading, setLoading] = useState(true);
+  const [msg, setMsg] = useState<string | null>(null);
 
   useEffect(() => {
-    async function ensureBonus() {
-      const { data: sessionData } = await supabase.auth.getSession();
-      const token = sessionData.session?.access_token;
-      if (!token) return;
+    let cancelled = false;
 
-      const res = await fetch(
-        `/api/pools/${poolId}/events/${eventId}/ensure-weekend-bonus`,
-        {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${token}`,
-          },
+    async function load() {
+      setLoading(true);
+      setMsg(null);
+
+      try {
+        // tijdelijke sanity check: alleen zodat build + runtime werkt
+        const { data, error } = await supabase
+          .from("pool_event_bonus_sets")
+          .select("id")
+          .eq("pool_id", poolId)
+          .eq("event_id", eventId)
+          .maybeSingle();
+
+        if (error) throw error;
+        if (!cancelled) {
+          // later vullen we hier de echte UI/vragen
+          setMsg(data ? "Bonus set gevonden ✅" : "Nog geen bonus set voor dit weekend.");
         }
-      );
-
-      const json = await res.json();
-
-      if (!res.ok) {
-        setError(json?.error ?? "Bonus ensure failed");
-        return;
+      } catch (e: any) {
+        if (!cancelled) setMsg(e?.message ?? "Onbekende fout");
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-
-      setBonus(json);
     }
 
-    ensureBonus();
+    if (poolId && eventId) load();
+    return () => {
+      cancelled = true;
+    };
   }, [poolId, eventId]);
 
   return (
-    <div style={{ marginTop: 20 }}>
-      <h2>Weekend Bonusvragen</h2>
-
-      {error && <p style={{ color: "red" }}>{error}</p>}
-
-      {!bonus && !error && <p>Laden...</p>}
-
-      {bonus && (
-        <ol>
-          {bonus.questions.map((q: any) => (
-            <li key={q.id}>{q.prompt}</li>
-          ))}
-        </ol>
-      )}
+    <div style={{ border: "1px solid #ddd", borderRadius: 14, padding: 16, marginTop: 14 }}>
+      <h2 style={{ marginTop: 0 }}>Weekend Bonusvragen</h2>
+      {loading ? <p>Loading…</p> : <p style={{ opacity: 0.85 }}>{msg}</p>}
     </div>
   );
 }
