@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
-import { supabase } from "@/lib/supabaseClient";
+import { supabase } from "../../../../../lib/supabaseClient";
 
 export default function BonusSection() {
   const params = useParams<{ id: string; eventId: string }>();
