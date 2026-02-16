@@ -49,11 +49,11 @@ export async function GET(req: Request) {
 
   // Membership check
   const { data: memberRow, error: memberErr } = await db
-    .from("pool_members")
-    .select("id")
-    .eq("pool_id", poolId)
-    .eq("user_id", userId)
-    .maybeSingle();
+  .from("pool_members")
+  .select("user_id") // ← dit is voldoende
+  .eq("pool_id", poolId)
+  .eq("user_id", userId)
+  .maybeSingle();
 
   if (memberErr) return jsonError(memberErr.message, 500);
   if (!memberRow) return jsonError("Not a pool member", 403);
