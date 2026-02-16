@@ -87,24 +87,36 @@ export async function POST(req: Request) {
 
   if (exErr) return jsonError(exErr.message, 500);
 
-  const current = (existing?.answer_json ?? {}) as Record<string, any>;
-  const next = { ...current };
-
-  if (value === null) {
-    delete next[questionId];
-  } else {
-    next[questionId] = value;
-  }
-
-  // Upsert
-  const { error: upErr } = await db
+  // value kan true/false/number/string/null zijn
+if (value === null) {
+  // delete answer row voor deze vraag
+  const { error: delErr } = await db
     .from("bonus_weekend_answers")
-    .upsert(
-      { pool_id: poolId, event_id: eventId, user_id: userId, answer_json: next },
-      { onConflict: "pool_id,event_id,user_id" }
-    );
+    .delete()
+    .eq("pool_id", poolId)
+    .eq("event_id", eventId)
+    .eq("user_id", userId)
+    .eq("question_id", questionId);
 
-  if (upErr) return jsonError(upErr.message, 500);
+  if (delErr) return jsonError(delErr.message, 500);
+  return NextResponse.json({ ok: true });
+}
 
-  return NextResponse.json({ ok: true, answers: next });
+// upsert 1 rij per vraag
+const payload = {
+  pool_id: poolId,
+  event_id: eventId,
+  user_id: userId,
+  question_id: questionId,
+  answer_json: value,
+};
+
+const { error: upErr } = await db
+  .from("bonus_weekend_answers")
+  .upsert(payload, { onConflict: "pool_id,event_id,user_id,question_id" });
+
+if (upErr) return jsonError(upErr.message, 500);
+
+return NextResponse.json({ ok: true });
+
 }
