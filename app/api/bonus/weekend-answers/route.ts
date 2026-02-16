@@ -79,7 +79,7 @@ export async function POST(req: Request) {
   // Haal huidige answers op
   const { data: existing, error: exErr } = await db
     .from("bonus_weekend_answers")
-    .select("answers")
+    .select("answer_json")
     .eq("pool_id", poolId)
     .eq("event_id", eventId)
     .eq("user_id", userId)
@@ -87,7 +87,7 @@ export async function POST(req: Request) {
 
   if (exErr) return jsonError(exErr.message, 500);
 
-  const current = (existing?.answers ?? {}) as Record<string, any>;
+  const current = (existing?.answer_json ?? {}) as Record<string, any>;
   const next = { ...current };
 
   if (value === null) {
@@ -100,7 +100,7 @@ export async function POST(req: Request) {
   const { error: upErr } = await db
     .from("bonus_weekend_answers")
     .upsert(
-      { pool_id: poolId, event_id: eventId, user_id: userId, answers: next },
+      { pool_id: poolId, event_id: eventId, user_id: userId, answer_json: next },
       { onConflict: "pool_id,event_id,user_id" }
     );
 
