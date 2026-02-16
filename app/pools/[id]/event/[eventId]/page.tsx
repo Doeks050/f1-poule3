@@ -244,6 +244,12 @@ export default function WeekendOverviewPage({
         <h1 style={{ margin: 0 }}>{eventRow.name}</h1>
       </div>
 
+      {/* Weekend Bonusvragen */}
+      <BonusSection
+       poolId={poolId}
+       eventId={eventId}
+      />
+
       <p style={{ marginTop: 8, marginBottom: 16 }}>
         <strong>{poolName}</strong> • {formatLabel(eventRow.format)}
         {eventRow.starts_at ? (
