@@ -178,7 +178,7 @@ export async function GET(req: Request) {
   // 7) Haal bestaande antwoorden op voor deze user
 const { data: answerRow, error: ansErr } = await db
   .from("bonus_weekend_answers")
-  .select("answers_json, updated_at")
+  .select("answer_json, updated_at")
   .eq("pool_id", poolId)
   .eq("event_id", eventId)
   .eq("user_id", userId)
@@ -190,7 +190,7 @@ return NextResponse.json({
   set: newSet,
   questions: (q as any).questions,
   isLocked,
-  answers: answerRow?.answers_json ?? {},
+  answers: answerRow?.answer_json ?? {},
   answersUpdatedAt: answerRow?.updated_at ?? null,
 });
 }
