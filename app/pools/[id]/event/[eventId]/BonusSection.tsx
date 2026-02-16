@@ -1,10 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-
-// ✅ BELANGRIJK: gebruik RELATIEVE import (geen @/)
-// pas dit pad aan als jouw lib map anders staat
 import { supabase } from "../../../../../lib/supabaseClient";
 
 type BonusQuestion = {
@@ -14,7 +11,6 @@ type BonusQuestion = {
   answer_kind: "boolean" | "text" | "number";
   options: any | null;
   is_active: boolean;
-  created_at?: string;
 };
 
 type BonusSet = {
@@ -24,6 +20,8 @@ type BonusSet = {
   lock_at: string | null;
   created_at: string;
 };
+
+type AnswersMap = Record<string, boolean>;
 
 export default function BonusSection({
   poolId,
@@ -38,6 +36,9 @@ export default function BonusSection({
   const [setRow, setSetRow] = useState<BonusSet | null>(null);
   const [questions, setQuestions] = useState<BonusQuestion[]>([]);
   const [isLocked, setIsLocked] = useState(false);
+
+  const [answers, setAnswers] = useState<AnswersMap>({});
+  const [savingId, setSavingId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,9 +67,7 @@ export default function BonusSection({
 
       try {
         const res = await fetch(`/api/bonus/weekend-set?poolId=${poolId}&eventId=${eventId}`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
+          headers: { Authorization: `Bearer ${token}` },
         });
 
         const json = await res.json();
@@ -78,6 +77,7 @@ export default function BonusSection({
           setSetRow(json.set ?? null);
           setQuestions(json.questions ?? []);
           setIsLocked(!!json.isLocked);
+          setAnswers((json.answers ?? {}) as AnswersMap);
           setLoading(false);
         }
       } catch (e: any) {
@@ -94,11 +94,51 @@ export default function BonusSection({
     };
   }, [poolId, eventId]);
 
-  const lockText = (() => {
+  const lockText = useMemo(() => {
     if (!setRow?.lock_at) return "Lock moment volgt zodra de eerste sessie bekend is.";
     const d = new Date(setRow.lock_at);
     return `Lockt op: ${d.toLocaleString()}`;
-  })();
+  }, [setRow?.lock_at]);
+
+  async function saveAnswer(questionId: string, value: boolean | null) {
+    setMsg(null);
+    setSavingId(questionId);
+
+    const { data: sessionData } = await supabase.auth.getSession();
+    const token = sessionData?.session?.access_token;
+    if (!token) {
+      setMsg("Je bent niet ingelogd.");
+      setSavingId(null);
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/bonus/weekend-answers", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ poolId, eventId, questionId, value }),
+      });
+
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || "Opslaan mislukt");
+
+      // server is source of truth
+      setAnswers((json.answers ?? {}) as AnswersMap);
+    } catch (e: any) {
+      setMsg(e?.message || "Onbekende fout");
+    } finally {
+      setSavingId(null);
+    }
+  }
+
+  function setLocalAndSave(questionId: string, value: boolean) {
+    // Optimistisch updaten
+    setAnswers((prev) => ({ ...prev, [questionId]: value }));
+    saveAnswer(questionId, value);
+  }
 
   return (
     <section
@@ -113,7 +153,7 @@ export default function BonusSection({
       <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
         <h2 style={{ margin: 0 }}>Weekend bonusvragen</h2>
         <span style={{ fontSize: 12, opacity: 0.7 }}>
-          3 vragen • 10 punten per goed antwoord
+          {questions.length || 0} vragen • 10 punten per goed antwoord
         </span>
       </div>
 
@@ -137,20 +177,75 @@ export default function BonusSection({
             </p>
           ) : (
             <ol style={{ marginTop: 10, marginBottom: 0, paddingLeft: 18 }}>
-              {questions.map((q) => (
-                <li key={q.id} style={{ marginBottom: 10 }}>
-                  <div style={{ fontWeight: 600 }}>{q.prompt}</div>
-                  <div style={{ fontSize: 12, opacity: 0.7 }}>
-                    Antwoord: ja/nee {isLocked ? "• (gelocked)" : "• (open)"}
-                  </div>
-                </li>
-              ))}
+              {questions.map((q) => {
+                const v = answers[q.id]; // true/false/undefined
+                const disabled = isLocked || savingId === q.id;
+
+                return (
+                  <li key={q.id} style={{ marginBottom: 14 }}>
+                    <div style={{ fontWeight: 600 }}>{q.prompt}</div>
+
+                    <div style={{ marginTop: 8, display: "flex", gap: 12, alignItems: "center" }}>
+                      <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <input
+                          type="radio"
+                          name={`q_${q.id}`}
+                          checked={v === true}
+                          disabled={disabled}
+                          onChange={() => setLocalAndSave(q.id, true)}
+                        />
+                        Ja
+                      </label>
+
+                      <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <input
+                          type="radio"
+                          name={`q_${q.id}`}
+                          checked={v === false}
+                          disabled={disabled}
+                          onChange={() => setLocalAndSave(q.id, false)}
+                        />
+                        Nee
+                      </label>
+
+                      {!isLocked && v !== undefined && (
+                        <button
+                          type="button"
+                          disabled={disabled}
+                          onClick={() => {
+                            // remove answer
+                            setAnswers((prev) => {
+                              const copy = { ...prev };
+                              delete copy[q.id];
+                              return copy;
+                            });
+                            saveAnswer(q.id, null);
+                          }}
+                          style={{
+                            marginLeft: 6,
+                            padding: "6px 10px",
+                            borderRadius: 10,
+                            border: "1px solid #ddd",
+                            background: "white",
+                            cursor: "pointer",
+                          }}
+                        >
+                          Wis
+                        </button>
+                      )}
+
+                      <span style={{ fontSize: 12, opacity: 0.7 }}>
+                        {isLocked ? "gelocked" : "open"}
+                        {savingId === q.id ? " • opslaan…" : ""}
+                      </span>
+                    </div>
+                  </li>
+                );
+              })}
             </ol>
           )}
 
           <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
-            Antwoorden invullen bouwen we hierna in.
-            {" "}
             <Link href={`/pools/${poolId}`}>Terug naar pool</Link>
           </div>
         </>
