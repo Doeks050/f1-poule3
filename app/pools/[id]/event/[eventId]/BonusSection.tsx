@@ -5,7 +5,7 @@ import Link from "next/link";
 
 // ✅ BELANGRIJK: gebruik RELATIEVE import (geen @/)
 // pas dit pad aan als jouw lib map anders staat
-import { supabase } from "../../../../lib/supabaseClient";
+import { supabase } from "../../../../../lib/supabaseClient";
 
 type BonusQuestion = {
   id: string;
