@@ -199,7 +199,7 @@ const answersUpdatedAt =
     .sort()
     .at(-1) ?? null;
 
-if (ansErr) return jsonError(ansErr.message, 500);
+if (ansErr) return jsonError((ansErr as any).message ?? "Unknown error", 500);
 
 return NextResponse.json({
   set: newSet,
