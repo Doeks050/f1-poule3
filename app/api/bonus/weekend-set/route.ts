@@ -184,12 +184,23 @@ export async function GET(req: Request) {
 
 if (ansErr) return jsonError((ansErr as any).message ?? "Unknown error", 500);
 
+// 7) Haal bestaande antwoorden op voor deze user (1 rij per vraag)
+const { data: answerRows, error: ansErr } = await db
+  .from("bonus_weekend_answers")
+  .select("question_id, answer_json, updated_at")
+  .eq("pool_id", poolId)
+  .eq("event_id", eventId)
+  .eq("user_id", userId);
+
+if (ansErr) return jsonError((ansErr as any).message ?? "Unknown error", 500);
+
 // Bouw { [question_id]: value }
 const answers: Record<string, any> = {};
 let answersUpdatedAt: string | null = null;
 
 for (const r of answerRows ?? []) {
   answers[r.question_id] = r.answer_json;
+
   if (r.updated_at && (!answersUpdatedAt || r.updated_at > answersUpdatedAt)) {
     answersUpdatedAt = r.updated_at;
   }
