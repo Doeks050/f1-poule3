@@ -422,7 +422,7 @@ export default function PoolDetailPage() {
       </main>
     );
   }
-
+  
   return (
   <main style={{ padding: 16, maxWidth: 900 }}>
       <Link href="/pools">← Terug</Link>
