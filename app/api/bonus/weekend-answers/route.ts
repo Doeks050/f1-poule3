@@ -111,12 +111,26 @@ const payload = {
   answer_json: value,
 };
 
-const { error: upErr } = await db
+const payload = {
+  pool_id: poolId,
+  event_id: eventId,
+  user_id: userId,
+  question_id: questionId,
+  answer_json: value, // boolean
+};
+
+const { data: upserted, error: upErr } = await db
   .from("bonus_weekend_answers")
-  .upsert(payload, { onConflict: "pool_id,event_id,user_id,question_id" });
+  .upsert(payload, { onConflict: "pool_id,event_id,user_id,question_id" })
+  .select("question_id, answer_json")
+  .single();
 
 if (upErr) return jsonError(upErr.message, 500);
 
-return NextResponse.json({ ok: true });
-
+return NextResponse.json({
+  ok: true,
+  answers: {
+    [upserted.question_id]: upserted.answer_json,
+  },
+});
 }
