@@ -111,14 +111,6 @@ const payload = {
   answer_json: value,
 };
 
-const payload = {
-  pool_id: poolId,
-  event_id: eventId,
-  user_id: userId,
-  question_id: questionId,
-  answer_json: value, // boolean
-};
-
 const { data: upserted, error: upErr } = await db
   .from("bonus_weekend_answers")
   .upsert(payload, { onConflict: "pool_id,event_id,user_id,question_id" })
