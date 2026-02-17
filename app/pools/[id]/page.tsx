@@ -414,17 +414,17 @@ export default function PoolDetailPage() {
   }
 
   if (loading) {
-    return (
-      <main style={{ padding: 16 }}>
-        <Link href="/pools">← Terug</Link>
-        <h1>Pool</h1>
-        <p>Loading…</p>
-      </main>
-    );
-  }
-  
   return (
-    <main style={{ padding: 16, maxWidth: 900 }}>
+    <main style={{ padding: 16 }}>
+      <Link href="/pools"> Terug</Link>
+      <h1>Pool</h1>
+      <p>Loading...</p>
+    </main>
+  );
+}
+
+return (
+  <main style={{ padding: 16, maxWidth: 900 }}>
       <Link href="/pools">← Terug</Link>
 
       <h1 style={{ marginBottom: 8 }}>{pool?.name ?? "Pool"}</h1>
