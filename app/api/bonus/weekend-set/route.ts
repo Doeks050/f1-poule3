@@ -175,37 +175,31 @@ export async function GET(req: Request) {
   const lockAt = newSet.lock_at ? new Date(newSet.lock_at).getTime() : null;
   const isLocked = lockAt ? Date.now() >= lockAt : false;
 
-  // 7) Haal bestaande antwoorden op voor deze user (1 rij per vraag)
-const { data: answerRows, error: ansErr } = await db
+  const { data: answerRows, error: ansErr } = await db
   .from("bonus_weekend_answers")
   .select("question_id, answer_json, updated_at")
   .eq("pool_id", poolId)
   .eq("event_id", eventId)
   .eq("user_id", userId);
 
-if (ansErr) return jsonError(ansErr.message, 500);
-
-// Bouw map: { [question_id]: answer_json }
-const answers = (answerRows ?? []).reduce<Record<string, any>>((acc, r) => {
-  acc[r.question_id] = r.answer_json;
-  return acc;
-}, {});
-
-// eventueel handig: laatste update moment
-const answersUpdatedAt =
-  (answerRows ?? [])
-    .map((r) => r.updated_at)
-    .filter(Boolean)
-    .sort()
-    .at(-1) ?? null;
-
 if (ansErr) return jsonError((ansErr as any).message ?? "Unknown error", 500);
+
+// Bouw { [question_id]: value }
+const answers: Record<string, any> = {};
+let answersUpdatedAt: string | null = null;
+
+for (const r of answerRows ?? []) {
+  answers[r.question_id] = r.answer_json;
+  if (r.updated_at && (!answersUpdatedAt || r.updated_at > answersUpdatedAt)) {
+    answersUpdatedAt = r.updated_at;
+  }
+}
 
 return NextResponse.json({
   set: newSet,
   questions: (q as any).questions,
   isLocked,
-  answers,               // <-- gebruik de map die je net hebt gebouwd
-  answersUpdatedAt,      // <-- gebruik de berekende laatste update
+  answers,
+  answersUpdatedAt,
 });
 }
