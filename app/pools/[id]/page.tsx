@@ -444,6 +444,20 @@ export default function PoolDetailPage() {
 
       {msg && <p style={{ color: "crimson" }}>{msg}</p>}
 
+      /* ✅ POOL LEADERBOARD (los van weekend hero) */
+<div
+  style={{
+    border: "1px solid #ddd",
+    borderRadius: 14,
+    padding: 16,
+    marginTop: 12,
+    background: "white",
+    boxShadow: "0 6px 18px rgba(0,0,0,0.06)",
+  }}
+>
+  <LeaderboardPanel poolId={poolId} />
+</div>
+
       {/* ✅ HERO KAART */}
       <div
         style={{
@@ -485,10 +499,6 @@ export default function PoolDetailPage() {
                 </div>
               )}
             </div>
-          </div>
-
-          <div style={{ marginTop: 18 }}>
-            <LeaderboardPanel poolId={poolId} />
           </div>
 
           <div
