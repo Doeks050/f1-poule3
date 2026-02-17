@@ -81,6 +81,8 @@ export default function PoolDetailPage() {
 
   const [pool, setPool] = useState<PoolRow | null>(null);
   const [events, setEvents] = useState<EventRow[]>([]);
+
+  // hero / next session
   const [nextSession, setNextSession] = useState<NextSessionRow | null>(null);
 
   // owner / role
@@ -90,11 +92,9 @@ export default function PoolDetailPage() {
   // reset invite loading
   const [resettingInvite, setResettingInvite] = useState(false);
 
-  // rename state
-  const [renaming, setRenaming] = useState(false);
+  // rename/delete states (owner tools)
   const [nameInput, setNameInput] = useState("");
-
-  // delete state
+  const [renaming, setRenaming] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
   // live clock for countdown
@@ -171,7 +171,7 @@ export default function PoolDetailPage() {
       }
 
       setPool(poolRow as PoolRow);
-      setNameInput(String((poolRow as any)?.name ?? ""));
+      setNameInput((poolRow as any)?.name ?? "");
 
       // ✅ Events ophalen (globaal)
       const { data: evRows, error: evErr } = await supabase
@@ -191,9 +191,7 @@ export default function PoolDetailPage() {
       // ✅ Hero: eerstvolgende open sessie (lock_at in de toekomst)
       const { data: ns, error: nsErr } = await supabase
         .from("event_sessions")
-        .select(
-          "id,event_id,session_key,name,starts_at,lock_at,events(id,name,format,starts_at)",
-        )
+        .select("id,event_id,session_key,name,starts_at,lock_at,events(id,name,format,starts_at)")
         .gt("lock_at", new Date().toISOString())
         .order("lock_at", { ascending: true })
         .limit(1);
@@ -213,9 +211,7 @@ export default function PoolDetailPage() {
   const nextEventId = useMemo(() => {
     if (nextSession?.event_id) return nextSession.event_id;
     const t = Date.now();
-    const upcoming = events.find(
-      (e) => (e.starts_at ? new Date(e.starts_at).getTime() : 0) > t,
-    );
+    const upcoming = events.find((e) => (e.starts_at ? new Date(e.starts_at).getTime() : 0) > t);
     return upcoming?.id ?? null;
   }, [nextSession?.event_id, events]);
 
@@ -316,18 +312,14 @@ export default function PoolDetailPage() {
   async function renamePool() {
     setMsg(null);
 
-    if (!poolId || !isUuid) {
-      setMsg("Ongeldige pool id.");
-      return;
-    }
     if (!isOwner) {
-      setMsg("Alleen de owner kan de pool hernoemen.");
+      setMsg("Alleen de owner kan de poolnaam aanpassen.");
       return;
     }
 
-    const newName = String(nameInput ?? "").trim();
-    if (newName.length < 2) {
-      setMsg("Pool naam moet minimaal 2 tekens zijn.");
+    const nextName = nameInput.trim();
+    if (nextName.length < 2) {
+      setMsg("Poolnaam moet minimaal 2 karakters zijn.");
       return;
     }
 
@@ -347,7 +339,7 @@ export default function PoolDetailPage() {
         "content-type": "application/json",
         authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ name: newName }),
+      body: JSON.stringify({ name: nextName }),
     });
 
     const raw = await res.text();
@@ -356,26 +348,21 @@ export default function PoolDetailPage() {
       json = JSON.parse(raw);
     } catch {}
 
+    setRenaming(false);
+
     if (!res.ok) {
-      setRenaming(false);
       setMsg(`Hernoemen mislukt (status ${res.status}). ${json?.error ?? raw}`.trim());
       return;
     }
 
-    setPool((prev) => (prev ? { ...prev, name: newName } : prev));
-    setMsg("✅ Pool hernoemd.");
+    setPool((prev) => (prev ? { ...prev, name: nextName } : prev));
+    setMsg("✅ Poolnaam aangepast.");
     setTimeout(() => setMsg(null), 1500);
-
-    setRenaming(false);
   }
 
   async function deletePool() {
     setMsg(null);
 
-    if (!poolId || !isUuid) {
-      setMsg("Ongeldige pool id.");
-      return;
-    }
     if (!isOwner) {
       setMsg("Alleen de owner kan de pool verwijderen.");
       return;
@@ -392,8 +379,9 @@ export default function PoolDetailPage() {
     }
 
     const res = await fetch(`/api/pools/${poolId}/delete`, {
-      method: "DELETE",
+      method: "POST",
       headers: {
+        "content-type": "application/json",
         authorization: `Bearer ${token}`,
       },
     });
@@ -404,8 +392,9 @@ export default function PoolDetailPage() {
       json = JSON.parse(raw);
     } catch {}
 
+    setDeleting(false);
+
     if (!res.ok) {
-      setDeleting(false);
       setMsg(`Verwijderen mislukt (status ${res.status}). ${json?.error ?? raw}`.trim());
       return;
     }
@@ -429,36 +418,32 @@ export default function PoolDetailPage() {
 
       <h1 style={{ marginBottom: 8 }}>{pool?.name ?? "Pool"}</h1>
 
-      <div style={{ display: "flex", gap: 14, alignItems: "baseline" }}>
-  <Link href={`/pools/${poolId}/members`}>Members</Link>
-
-  <span style={{ opacity: 0.5 }}>•</span>
-
-  <Link href={`/pools/${poolId}/rules`}>Regels & scoring</Link>
-
-  <span style={{ fontSize: 12, opacity: 0.65 }}>
-    Jouw rol: <strong>{myRole ?? "-"}</strong>
-  </span>
-</div>
-
+      <div style={{ display: "flex", gap: 14, alignItems: "baseline", flexWrap: "wrap" }}>
+        <Link href={`/pools/${poolId}/members`}>Members</Link>
+        <Link href={`/pools/${poolId}/rules`}>Regels & punten</Link>
+        <span style={{ fontSize: 12, opacity: 0.65 }}>
+          Jouw rol: <strong>{myRole ?? "-"}</strong>
+        </span>
+      </div>
 
       {msg && <p style={{ color: "crimson" }}>{msg}</p>}
 
+      {/* ✅ LEADERBOARD ALS APARTE HERO (boven Next Up) */}
       <div
-  style={{
-    border: "1px solid #ddd",
-    borderRadius: 14,
-    padding: 16,
-    marginTop: 12,
-    background: "white",
-    boxShadow: "0 6px 18px rgba(0,0,0,0.06)",
-  }}
->
-  <LeaderboardPanel poolId={poolId} />
-</div>
+        style={{
+          border: "1px solid #ddd",
+          borderRadius: 14,
+          padding: 16,
+          marginTop: 12,
+          background: "white",
+          boxShadow: "0 6px 18px rgba(0,0,0,0.06)",
+        }}
+      >
+        <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 8 }}>Leaderboard</div>
+        <LeaderboardPanel poolId={poolId} />
+      </div>
 
-
-      {/* ✅ HERO KAART */}
+      {/* ✅ NEXT UP HERO (zonder leaderboard) */}
       <div
         style={{
           border: "1px solid #ddd",
@@ -499,15 +484,16 @@ export default function PoolDetailPage() {
                 </div>
               )}
             </div>
-          </div
+          </div>
 
-
+          {/* ✅ FIX: hier stond </div zonder > */}
           <div
             style={{
               display: "flex",
               flexDirection: "column",
               gap: 10,
               alignItems: "flex-end",
+              justifyContent: "flex-start",
             }}
           >
             {hero ? (
@@ -568,7 +554,7 @@ export default function PoolDetailPage() {
             </div>
           </div>
 
-          <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 8 }}>
+          <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
             <button onClick={copyInvite}>Copy invite link</button>
 
             {isOwner ? (
@@ -659,10 +645,7 @@ export default function PoolDetailPage() {
 
             return (
               <li key={e.id} style={{ marginBottom: 10 }}>
-                <Link
-                  href={`/pools/${poolId}/event/${e.id}`}
-                  style={{ fontWeight: isNext ? "bold" : "normal" }}
-                >
+                <Link href={`/pools/${poolId}/event/${e.id}`} style={{ fontWeight: isNext ? "bold" : "normal" }}>
                   {isNext ? "➡️ " : ""}
                   {e.name}
                 </Link>
