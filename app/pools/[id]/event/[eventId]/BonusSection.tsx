@@ -126,7 +126,10 @@ export default function BonusSection({
       if (!res.ok) throw new Error(json?.error || "Opslaan mislukt");
 
       // server is source of truth
-      setAnswers((json.answers ?? {}) as AnswersMap);
+      setAnswers((prev) => ({
+  ...prev,
+  ...((json.answers ?? {}) as AnswersMap),
+  }));
     } catch (e: any) {
       setMsg(e?.message || "Onbekende fout");
     } finally {
