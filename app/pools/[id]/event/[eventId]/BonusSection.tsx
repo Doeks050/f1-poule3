@@ -156,7 +156,7 @@ export default function BonusSection({
       <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
         <h2 style={{ margin: 0 }}>Weekend bonusvragen</h2>
         <span style={{ fontSize: 12, opacity: 0.7 }}>
-          {questions.length || 0} vragen • 10 punten per goed antwoord
+          {questions.length || 0} vragen • 5 punten per goed antwoord
         </span>
       </div>
 
