@@ -485,7 +485,8 @@ export default function PoolDetailPage() {
             <div style={{ marginTop: 6, opacity: 0.85 }}>
               {hero ? (
                 <>
-                  <div style={{ fontWeight: 700 }}>{hero.sessionTitle}</div>
+                  <div style={{ fontWeight: 700 }}>{hero.sessionTitle}
+                  </div>
                   <div style={{ marginTop: 4 }}>
                     🔓 Lock in <strong>{hero.lockIn}</strong> (om {hero.lockAtLocal})
                   </div>
