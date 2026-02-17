@@ -76,16 +76,17 @@ export async function POST(req: Request) {
   if (linkErr) return jsonError(linkErr.message, 500);
   if (!linkRow) return jsonError("Question not in this set", 400);
 
-  // Haal huidige answers op
-  const { data: existing, error: exErr } = await db
-    .from("bonus_weekend_answers")
-    .select("answer_json")
-    .eq("pool_id", poolId)
-    .eq("event_id", eventId)
-    .eq("user_id", userId)
-    .maybeSingle();
+  // Haal huidige answer op (alleen voor deze vraag)
+const { data: existing, error: exErr } = await db
+  .from("bonus_weekend_answers")
+  .select("answer_json")
+  .eq("pool_id", poolId)
+  .eq("event_id", eventId)
+  .eq("user_id", userId)
+  .eq("question_id", questionId)
+  .maybeSingle();
 
-  if (exErr) return jsonError(exErr.message, 500);
+if (exErr) return jsonError(exErr.message, 500);
 
   // value kan true/false/number/string/null zijn
 if (value === null) {
