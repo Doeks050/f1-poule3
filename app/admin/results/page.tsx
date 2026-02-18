@@ -2,51 +2,88 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@supabase/supabase-js";
+import Link from "next/link";
+import { supabase } from "../../../lib/supabaseClient";
 
 /**
- * IMPORTANT
- * - This page is a combined Admin portal:
- *   - Sessions tab: existing per-session results editor (event_sessions -> event_results.result_json)
- *   - Season bonus tab: official season answers (bonus_question_bank scope='season' -> season_official_answers.correct_answer_json)
+ * NOTE:
+ * - This page is intentionally "simple admin UI" (no shadcn/tailwind dependency).
+ * - It supports 2 tabs:
+ *   1) Sessions: per session Top10 (stored in event_results.result_json.sessions[sessionId].top10)
+ *   2) Season bonus: 3 season questions (stored in bonus_question_bank where scope='season')
  */
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseAnon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-const supabase = createClient(supabaseUrl, supabaseAnon);
+type EventRow = {
+  id: string;
+  name: string;
+  starts_at: string | null;
+  format: string | null;
+};
 
-// =======================
-// 2026 Drivers (codes used as stored values)
-// Source used in this project flow: your requirement “dropdown with 2026 drivers/teams incl Audi + Cadillac”
-// =======================
-const F1_DRIVERS_2026 = [
-  { code: "NORRIS", name: "Lando Norris", teamName: "McLaren" },
-  { code: "PIASTRI", name: "Oscar Piastri", teamName: "McLaren" },
-  { code: "LECLERC", name: "Charles Leclerc", teamName: "Ferrari" },
-  { code: "HAMILTON", name: "Lewis Hamilton", teamName: "Ferrari" },
-  { code: "VERSTAPPEN", name: "Max Verstappen", teamName: "Red Bull" },
-  { code: "HADJAR", name: "Isack Hadjar", teamName: "Red Bull" },
-  { code: "RUSSELL", name: "George Russell", teamName: "Mercedes" },
-  { code: "ANTONELLI", name: "Kimi Antonelli", teamName: "Mercedes" },
-  { code: "ALONSO", name: "Fernando Alonso", teamName: "Aston Martin" },
-  { code: "STROLL", name: "Lance Stroll", teamName: "Aston Martin" },
-  { code: "GASLY", name: "Pierre Gasly", teamName: "Alpine" },
-  { code: "COLAPINTO", name: "Franco Colapinto", teamName: "Alpine" },
-  { code: "OCON", name: "Esteban Ocon", teamName: "Haas" },
-  { code: "BEARMAN", name: "Oliver Bearman", teamName: "Haas" },
-  { code: "LAWSON", name: "Liam Lawson", teamName: "Racing Bulls" },
-  { code: "LINDBLAD", name: "Arvid Lindblad", teamName: "Racing Bulls" },
-  { code: "SAINZ", name: "Carlos Sainz", teamName: "Williams" },
-  { code: "ALBON", name: "Alex Albon", teamName: "Williams" },
-  { code: "HULKENBERG", name: "Nico Hülkenberg", teamName: "Audi" },
-  { code: "BORTOLETO", name: "Gabriel Bortoleto", teamName: "Audi" },
-  { code: "PEREZ", name: "Sergio Pérez", teamName: "Cadillac" },
-  { code: "BOTTAS", name: "Valtteri Bottas", teamName: "Cadillac" },
-] as const;
+type SessionRow = {
+  id: string;
+  event_id: string;
+  name: string;
+  session_key: string | null;
+  starts_at: string | null;
+  lock_at: string | null;
+};
 
-const F1_TEAMS_2026 = Array.from(new Set(F1_DRIVERS_2026.map((d) => d.teamName))).sort();
+type EventResultsRow = {
+  // Some older schemas do NOT have `id`. We only rely on event_id.
+  id?: string;
+  event_id: string;
+  result_json: any;
+  created_at?: string;
+  updated_at?: string;
+};
 
-function fmtLocal(iso: string | null | undefined) {
+type BonusQuestionRow = {
+  id: string;
+  scope: "weekend" | "season";
+  prompt: string;
+  answer_kind: "boolean" | "text" | "number" | "driver" | "team";
+  is_active: boolean;
+  // recommended: add this column in DB
+  question_key?: string | null;
+};
+
+type SeasonOfficialAnswerRow = {
+  id?: string;
+  season_year: number;
+  question_key: string;
+  correct_answer: string | boolean | number | null;
+  created_at?: string;
+  updated_at?: string;
+};
+
+type DriverOpt = { code: string; name: string; teamName: string };
+type TeamOpt = { key: string; name: string };
+
+const F1_TEAMS_2026: TeamOpt[] = [
+  { key: "RED_BULL", name: "Red Bull" },
+  { key: "FERRARI", name: "Ferrari" },
+  { key: "MERCEDES", name: "Mercedes" },
+  { key: "MCLAREN", name: "McLaren" },
+  { key: "ASTON_MARTIN", name: "Aston Martin" },
+  { key: "ALPINE", name: "Alpine" },
+  { key: "WILLIAMS", name: "Williams" },
+  { key: "HAAS", name: "Haas" },
+  { key: "RACING_BULLS", name: "Racing Bulls" },
+  { key: "AUDI", name: "Audi" },
+  { key: "CADILLAC", name: "Cadillac" },
+];
+
+/**
+ * Fill this list with your definitive 2026 line-up.
+ * The UI uses `code` as the stored value (e.g. "VER").
+ */
+const F1_DRIVERS_2026: DriverOpt[] = [
+  // Example:
+  // { code: "VER", name: "Max Verstappen", teamName: "Red Bull" },
+];
+
+function fmtLocal(iso: string | null) {
   if (!iso) return "—";
   try {
     return new Date(iso).toLocaleString();
@@ -55,314 +92,328 @@ function fmtLocal(iso: string | null | undefined) {
   }
 }
 
-// =======================
-// Types (Sessions tab)
-// =======================
-type EventRow = {
-  id: string;
-  name: string;
-  starts_at: string | null;
-  format?: string | null;
-};
+function getTeamColorByTeamKey(teamKey: string) {
+  // Optional: keep simple. You can expand later with real colors.
+  switch (teamKey) {
+    case "FERRARI":
+      return "#dc0000";
+    case "MCLAREN":
+      return "#ff8700";
+    case "MERCEDES":
+      return "#00d2be";
+    case "RED_BULL":
+      return "#1e41ff";
+    case "ASTON_MARTIN":
+      return "#006f62";
+    case "ALPINE":
+      return "#0090ff";
+    case "WILLIAMS":
+      return "#005aff";
+    case "HAAS":
+      return "#b6babd";
+    case "RACING_BULLS":
+      return "#2b4562";
+    case "AUDI":
+      return "#111111";
+    case "CADILLAC":
+      return "#0b3d91";
+    default:
+      return "#999";
+  }
+}
 
-type SessionRow = {
-  id: string;
-  event_id: string;
-  name: string;
-  session_key: string;
-  starts_at: string;
-  lock_at: string;
-};
+function getTeamColorByDriverCode(driverCode: string | null) {
+  if (!driverCode) return "#999";
+  const d = F1_DRIVERS_2026.find((x) => x.code === driverCode);
+  if (!d) return "#999";
+  // Map by teamName -> find key
+  const teamKey =
+    F1_TEAMS_2026.find((t) => t.name.toLowerCase() === d.teamName.toLowerCase())?.key ?? "";
+  return getTeamColorByTeamKey(teamKey);
+}
 
-type EventResultsRow = {
-  id: string;
-  event_id: string;
-  result_json: any;
-  created_at?: string;
-  updated_at?: string;
-};
+async function requireAdminOrRedirect(setMsg: (s: string) => void, router: any, setEmail: (s: string) => void) {
+  const { data: auth } = await supabase.auth.getUser();
+  const user = auth?.user;
+  if (!user) {
+    router.replace("/login");
+    return { ok: false, userId: null as string | null };
+  }
+  setEmail(user.email ?? "");
 
-// =======================
-// Types (Season bonus tab)
-// =======================
-type SeasonQuestion = {
-  id: string;
-  question_key: string;
-  prompt: string;
-  answer_kind: "boolean" | "driver" | "team";
-};
+  // app_admins table: rows { user_id uuid }
+  const adminRes = await supabase.from("app_admins").select("user_id").eq("user_id", user.id).maybeSingle();
+
+  if (adminRes.error) {
+    setMsg("Error checking admin: " + adminRes.error.message);
+    router.replace("/pools");
+    return { ok: false, userId: user.id };
+  }
+  if (!adminRes.data) {
+    setMsg("Not an admin.");
+    router.replace("/pools");
+    return { ok: false, userId: user.id };
+  }
+  return { ok: true, userId: user.id };
+}
 
 export default function AdminResultsPage() {
   const router = useRouter();
 
-  // Tabs
   const [tab, setTab] = useState<"sessions" | "season">("sessions");
 
-  // Auth info
   const [loading, setLoading] = useState(true);
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [email, setEmail] = useState("");
-
-  // General message
   const [msg, setMsg] = useState<string | null>(null);
 
-  // ================
-  // Sessions tab state
-  // ================
+  const [email, setEmail] = useState("");
+
+  // LEFT: events + sessions
   const [events, setEvents] = useState<EventRow[]>([]);
   const [selectedEventId, setSelectedEventId] = useState<string>("");
-  const selectedEvent = useMemo(() => events.find((e) => e.id === selectedEventId) ?? null, [events, selectedEventId]);
 
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string>("");
-  const selectedSession = useMemo(
-    () => sessions.find((s) => s.id === selectedSessionId) ?? null,
-    [sessions, selectedSessionId]
-  );
 
+  // RIGHT: event_results result_json
   const [eventResultsRow, setEventResultsRow] = useState<EventResultsRow | null>(null);
+  const [top10, setTop10] = useState<(string | null)[]>(Array.from({ length: 10 }, () => null));
   const [saving, setSaving] = useState(false);
 
-  // Existing UI top10 (per session)
-  const [top10, setTop10] = useState<string[]>(Array.from({ length: 10 }, () => ""));
-
-  // ================
-  // Season bonus tab state
-  // ================
+  // SEASON BONUS
   const [seasonYear, setSeasonYear] = useState<number>(2026);
-  const [seasonQuestions, setSeasonQuestions] = useState<SeasonQuestion[]>([]);
-  const [seasonAnswers, setSeasonAnswers] = useState<Record<string, boolean | string | null>>({});
-  const [seasonLoading, setSeasonLoading] = useState(false);
-  const [seasonSaving, setSeasonSaving] = useState(false);
-  const [seasonMsg, setSeasonMsg] = useState<string | null>(null);
+  const [seasonQuestions, setSeasonQuestions] = useState<BonusQuestionRow[]>([]);
+  const [seasonOfficialAnswers, setSeasonOfficialAnswers] = useState<Record<string, any>>({}); // question_key -> correct_answer
 
-  // ==========================================
-  // Auth + Admin gate
-  // ==========================================
+  // ----------- init admin + load events -----------
   useEffect(() => {
     (async () => {
       setLoading(true);
       setMsg(null);
 
-      const { data: sessionData } = await supabase.auth.getSession();
-      const user = sessionData.session?.user;
-
-      if (!user) {
-        router.replace("/login");
-        return;
-      }
-
-      setEmail(user.email ?? "");
-
-      // Check admin
-      const { data: adminRow, error } = await supabase.from("app_admins").select("user_id").eq("user_id", user.id).maybeSingle();
-
-      if (error) {
-        setMsg(`Admin check failed: ${error.message}`);
-        setIsAdmin(false);
+      const admin = await requireAdminOrRedirect(setMsg, router, setEmail);
+      if (!admin.ok) {
         setLoading(false);
         return;
       }
 
-      if (!adminRow) {
-        setMsg("Not an admin.");
-        setIsAdmin(false);
+      // load events
+      const evRes = await supabase
+        .from("events")
+        .select("id,name,starts_at,format")
+        .order("starts_at", { ascending: true });
+
+      if (evRes.error) {
+        setMsg("Error loading events: " + evRes.error.message);
         setLoading(false);
         return;
       }
 
-      setIsAdmin(true);
+      setEvents(evRes.data ?? []);
+      if ((evRes.data ?? []).length > 0) setSelectedEventId(evRes.data![0].id);
+
       setLoading(false);
-
-      // Load initial sessions tab data
-      await loadEvents();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ==========================================
-  // Sessions tab loaders
-  // ==========================================
-  async function loadEvents() {
-    setMsg(null);
-
-    const { data, error } = await supabase
-      .from("events")
-      .select("id, name, starts_at, format")
-      .order("starts_at", { ascending: true });
-
-    if (error) {
-      setMsg(`Error loading events: ${error.message}`);
-      return;
-    }
-
-    setEvents((data as any) ?? []);
-
-    // keep selection if possible, else select first
-    const firstId = (data as any)?.[0]?.id ?? "";
-    setSelectedEventId((prev) => prev || firstId);
-  }
-
+  // ----------- when event changes: load sessions + event_results -----------
   useEffect(() => {
-    if (!isAdmin) return;
     if (!selectedEventId) return;
+
     (async () => {
-      setSelectedSessionId("");
-      setSessions([]);
-      setEventResultsRow(null);
-      setTop10(Array.from({ length: 10 }, () => ""));
-      await loadSessions(selectedEventId);
-      await loadEventResults(selectedEventId);
+      setMsg(null);
+
+      const sRes = await supabase
+        .from("event_sessions")
+        .select("id,event_id,name,session_key,starts_at,lock_at")
+        .eq("event_id", selectedEventId)
+        .order("starts_at", { ascending: true });
+
+      if (sRes.error) {
+        setMsg("Error loading sessions: " + sRes.error.message);
+        setSessions([]);
+        setSelectedSessionId("");
+        return;
+      }
+
+      const list = (sRes.data ?? []) as SessionRow[];
+      setSessions(list);
+      setSelectedSessionId(list[0]?.id ?? "");
+
+      // load event_results row for this event_id
+      // IMPORTANT: do NOT select "id" because some schemas don't have it.
+      const rRes = await supabase
+        .from("event_results")
+        .select("event_id,result_json,created_at,updated_at")
+        .eq("event_id", selectedEventId)
+        .maybeSingle();
+
+      if (rRes.error) {
+        setMsg("Error loading event_results: " + rRes.error.message);
+        setEventResultsRow(null);
+      } else {
+        setEventResultsRow((rRes.data as any) ?? null);
+      }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedEventId, isAdmin]);
+  }, [selectedEventId]);
 
-  async function loadSessions(eventId: string) {
-    const { data, error } = await supabase
-      .from("event_sessions")
-      .select("id, event_id, name, session_key, starts_at, lock_at")
-      .eq("event_id", eventId)
-      .order("starts_at", { ascending: true });
-
-    if (error) {
-      setMsg(`Error loading sessions: ${error.message}`);
-      return;
-    }
-
-    setSessions((data as any) ?? []);
-    const firstSessionId = (data as any)?.[0]?.id ?? "";
-    setSelectedSessionId((prev) => prev || firstSessionId);
-  }
-
-  async function loadEventResults(eventId: string) {
-    const { data, error } = await supabase
-      .from("event_results")
-      .select("id, event_id, result_json, created_at, updated_at")
-      .eq("event_id", eventId)
-      .maybeSingle();
-
-    if (error) {
-      setMsg(`Error loading event_results: ${error.message}`);
-      return;
-    }
-
-    const row = (data as any) ?? null;
-    setEventResultsRow(row);
-
-    // hydrate top10 for selected session
-    const sessionId = selectedSessionId;
-    if (row?.result_json?.sessions && sessionId && row.result_json.sessions[sessionId]?.top10) {
-      setTop10(row.result_json.sessions[sessionId].top10 ?? Array.from({ length: 10 }, () => ""));
-    }
-  }
-
-  // Keep top10 updated when switching sessions
+  // ----------- when session OR eventResultsRow changes: hydrate top10 -----------
   useEffect(() => {
-    if (!selectedSessionId) return;
-    const row = eventResultsRow;
-    if (row?.result_json?.sessions?.[selectedSessionId]?.top10) {
-      setTop10(row.result_json.sessions[selectedSessionId].top10 ?? Array.from({ length: 10 }, () => ""));
-    } else {
-      setTop10(Array.from({ length: 10 }, () => ""));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSessionId]);
+    const json = eventResultsRow?.result_json ?? {};
+    const sessionBlock = json?.sessions?.[selectedSessionId] ?? {};
+    const savedTop10: (string | null)[] = Array.isArray(sessionBlock?.top10) ? sessionBlock.top10 : [];
+    const padded = Array.from({ length: 10 }, (_, i) => savedTop10[i] ?? null);
+    setTop10(padded);
+  }, [selectedSessionId, eventResultsRow]);
 
-  function updatePos(idx: number, value: string) {
+  function updatePos(idx: number, driverCode: string) {
     setTop10((prev) => {
       const next = [...prev];
-      next[idx] = value;
+      next[idx] = driverCode || null;
       return next;
     });
   }
 
   async function clearSession() {
     if (!selectedEventId || !selectedSessionId) return;
-
     setSaving(true);
     setMsg(null);
 
-    // Ensure row exists
-    let row = eventResultsRow;
-    if (!row) {
-      const { data: created, error: createErr } = await supabase
-        .from("event_results")
-        .insert({ event_id: selectedEventId, result_json: { sessions: {} } })
-        .select("id, event_id, result_json")
-        .single();
+    const base = eventResultsRow?.result_json ?? {};
+    const next = { ...base, sessions: { ...(base.sessions ?? {}) } };
+    next.sessions[selectedSessionId] = { ...(next.sessions[selectedSessionId] ?? {}), top10: [] };
 
-      if (createErr) {
-        setMsg(createErr.message);
-        setSaving(false);
-        return;
-      }
+    const upRes = await supabase
+      .from("event_results")
+      .upsert(
+        {
+          event_id: selectedEventId,
+          result_json: next,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "event_id" }
+      )
+      .select("event_id,result_json,created_at,updated_at")
+      .single();
 
-      row = created as any;
-      setEventResultsRow(row as any);
-    }
+    setSaving(false);
 
-    const nextJson = { ...(row!.result_json ?? {}) };
-    nextJson.sessions = { ...(nextJson.sessions ?? {}) };
-    nextJson.sessions[selectedSessionId] = { ...(nextJson.sessions[selectedSessionId] ?? {}), top10: Array.from({ length: 10 }, () => "") };
-
-    const { error } = await supabase.from("event_results").update({ result_json: nextJson }).eq("id", row!.id);
-
-    if (error) {
-      setMsg(error.message);
-      setSaving(false);
+    if (upRes.error) {
+      setMsg("Error clearing: " + upRes.error.message);
       return;
     }
-
-    setEventResultsRow((prev) => (prev ? { ...prev, result_json: nextJson } : prev));
-    setTop10(Array.from({ length: 10 }, () => ""));
-    setMsg("✅ Cleared session results.");
-    setSaving(false);
+    setEventResultsRow(upRes.data as any);
+    setMsg("✅ Cleared session top10");
   }
 
   async function saveResultsForSession() {
     if (!selectedEventId || !selectedSessionId) return;
-
     setSaving(true);
     setMsg(null);
 
-    // Ensure row exists
-    let row = eventResultsRow;
-    if (!row) {
-      const { data: created, error: createErr } = await supabase
-        .from("event_results")
-        .insert({ event_id: selectedEventId, result_json: { sessions: {} } })
-        .select("id, event_id, result_json")
-        .single();
+    const cleaned = top10.map((x) => (x && x.trim() ? x.trim().toUpperCase() : null)).filter((x) => x !== null);
 
-      if (createErr) {
-        setMsg(createErr.message);
-        setSaving(false);
-        return;
-      }
+    const base = eventResultsRow?.result_json ?? {};
+    const next = { ...base, sessions: { ...(base.sessions ?? {}) } };
+    next.sessions[selectedSessionId] = { ...(next.sessions[selectedSessionId] ?? {}), top10: cleaned };
 
-      row = created as any;
-      setEventResultsRow(row as any);
+    const upRes = await supabase
+      .from("event_results")
+      .upsert(
+        {
+          event_id: selectedEventId,
+          result_json: next,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "event_id" }
+      )
+      .select("event_id,result_json,created_at,updated_at")
+      .single();
+
+    setSaving(false);
+
+    if (upRes.error) {
+      setMsg("Error saving: " + upRes.error.message);
+      return;
     }
+    setEventResultsRow(upRes.data as any);
+    setMsg("✅ Session results saved");
+  }
 
-    const nextJson = { ...(row!.result_json ?? {}) };
-    nextJson.sessions = { ...(nextJson.sessions ?? {}) };
-    nextJson.sessions[selectedSessionId] = {
-      ...(nextJson.sessions[selectedSessionId] ?? {}),
-      top10: top10,
-      updated_at: new Date().toISOString(),
-    };
+  // ----------- SEASON BONUS: load questions + official answers -----------
+  async function loadSeasonBonus() {
+    setMsg(null);
 
-    const { error } = await supabase.from("event_results").update({ result_json: nextJson }).eq("id", row!.id);
+    // load active season questions
+    const qRes = await supabase
+      .from("bonus_question_bank")
+      .select("id,scope,prompt,answer_kind,is_active,question_key")
+      .eq("scope", "season")
+      .eq("is_active", true)
+      .order("prompt", { ascending: true });
 
-    if (error) {
-      setMsg(error.message);
-      setSaving(false);
+    if (qRes.error) {
+      setMsg("Error loading season questions: " + qRes.error.message);
+      setSeasonQuestions([]);
       return;
     }
 
-    setEventResultsRow((prev) => (prev ? { ...prev, result_json: nextJson } : prev));
-    setMsg("✅ Saved session results.");
+    const qs = (qRes.data ?? []) as BonusQuestionRow[];
+    setSeasonQuestions(qs);
+
+    // load official answers for that season
+    const aRes = await supabase
+      .from("season_official_answers")
+      .select("season_year,question_key,correct_answer")
+      .eq("season_year", seasonYear);
+
+    if (aRes.error) {
+      setMsg("Error loading season official answers: " + aRes.error.message);
+      setSeasonOfficialAnswers({});
+      return;
+    }
+
+    const map: Record<string, any> = {};
+    for (const row of (aRes.data ?? []) as any[]) {
+      if (row.question_key) map[row.question_key] = row.correct_answer;
+    }
+    setSeasonOfficialAnswers(map);
+  }
+
+  // auto-load when switching to season tab or changing season year
+  useEffect(() => {
+    if (tab !== "season") return;
+    loadSeasonBonus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, seasonYear]);
+
+  async function saveSeasonOfficialAnswer(questionKey: string, value: any) {
+    setSaving(true);
+    setMsg(null);
+
+    const upRes = await supabase
+      .from("season_official_answers")
+      .upsert(
+        {
+          season_year: seasonYear,
+          question_key: questionKey,
+          correct_answer: value,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "season_year,question_key" }
+      )
+      .select("season_year,question_key,correct_answer")
+      .single();
+
     setSaving(false);
+
+    if (upRes.error) {
+      setMsg("Error saving season answer: " + upRes.error.message);
+      return;
+    }
+
+    setSeasonOfficialAnswers((prev) => ({ ...prev, [questionKey]: upRes.data.correct_answer }));
+    setMsg("✅ Season official answer saved");
   }
 
   async function logout() {
@@ -370,100 +421,20 @@ export default function AdminResultsPage() {
     router.replace("/login");
   }
 
-  // ==========================================
-  // Season bonus tab logic
-  // ==========================================
-  useEffect(() => {
-    if (!isAdmin) return;
-    if (tab !== "season") return;
-    loadSeasonBonus(seasonYear);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, seasonYear, isAdmin]);
+  const selectedEvent = useMemo(() => events.find((e) => e.id === selectedEventId) ?? null, [events, selectedEventId]);
+  const selectedSession = useMemo(
+    () => sessions.find((s) => s.id === selectedSessionId) ?? null,
+    [sessions, selectedSessionId]
+  );
 
-  async function loadSeasonBonus(year: number) {
-    setSeasonLoading(true);
-    setSeasonMsg(null);
-
-    // 1) Load season questions from question bank
-    const { data: qData, error: qErr } = await supabase
-      .from("bonus_question_bank")
-      .select("id, question_key, prompt, answer_kind")
-      .eq("scope", "season")
-      .order("created_at", { ascending: true });
-
-    if (qErr) {
-      setSeasonMsg(`Error loading season questions: ${qErr.message}`);
-      setSeasonLoading(false);
-      return;
-    }
-
-    setSeasonQuestions((qData as any) ?? []);
-
-    // 2) Load already saved official answers for this season year
-    const { data: aData, error: aErr } = await supabase
-      .from("season_official_answers")
-      .select("question_key, correct_answer_json")
-      .eq("season_year", year);
-
-    if (aErr) {
-      setSeasonMsg(`Error loading season official answers: ${aErr.message}`);
-      setSeasonLoading(false);
-      return;
-    }
-
-    const map: Record<string, boolean | string | null> = {};
-    for (const row of (aData as any[]) ?? []) {
-      map[row.question_key] =
-        row.correct_answer_json === null || row.correct_answer_json === undefined ? null : row.correct_answer_json;
-    }
-    setSeasonAnswers(map);
-    setSeasonLoading(false);
-  }
-
-  async function setSeasonOfficialAnswer(year: number, question: SeasonQuestion, value: boolean | string) {
-    setSeasonSaving(true);
-    setSeasonMsg(null);
-
-    const { data: sessionData } = await supabase.auth.getSession();
-    const userId = sessionData.session?.user?.id;
-    if (!userId) {
-      setSeasonMsg("No valid session.");
-      setSeasonSaving(false);
-      return;
-    }
-
-    const { error } = await supabase.from("season_official_answers").upsert({
-      season_year: year,
-      question_key: question.question_key,
-      correct_answer_json: value,
-      is_resolved: true,
-      resolved_at: new Date().toISOString(),
-      created_by: userId,
-    });
-
-    if (error) {
-      setSeasonMsg(error.message);
-      setSeasonSaving(false);
-      return;
-    }
-
-    setSeasonAnswers((prev) => ({ ...prev, [question.question_key]: value }));
-    setSeasonMsg("✅ Answer saved.");
-    setSeasonSaving(false);
-  }
-
-  // ==========================================
-  // Render
-  // ==========================================
   if (loading) return <main style={{ padding: 16 }}>Loading…</main>;
-  if (!isAdmin) return <main style={{ padding: 16 }}>{msg ?? "Not authorized."}</main>;
 
   return (
     <main style={{ padding: 16, maxWidth: 980 }}>
       <h1>Admin Results</h1>
       <p>Ingelogd als: {email}</p>
 
-      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+      <div style={{ marginTop: 10, display: "flex", gap: 10 }}>
         <button
           onClick={() => setTab("sessions")}
           style={{
@@ -472,10 +443,12 @@ export default function AdminResultsPage() {
             border: "1px solid #ccc",
             background: tab === "sessions" ? "#111" : "white",
             color: tab === "sessions" ? "white" : "#111",
+            cursor: "pointer",
           }}
         >
           Sessies
         </button>
+
         <button
           onClick={() => setTab("season")}
           style={{
@@ -484,6 +457,7 @@ export default function AdminResultsPage() {
             border: "1px solid #ccc",
             background: tab === "season" ? "#111" : "white",
             color: tab === "season" ? "white" : "#111",
+            cursor: "pointer",
           }}
         >
           Season bonus
@@ -494,120 +468,134 @@ export default function AdminResultsPage() {
         <p style={{ marginTop: 12, color: msg.startsWith("✅") ? "green" : "crimson" }}>{msg}</p>
       ) : null}
 
-      {/* =========================
-          TAB: SESSIONS
-         ========================= */}
       {tab === "sessions" && (
-        <div>
-          <div style={{ display: "flex", gap: 24, marginTop: 16, flexWrap: "wrap" }}>
-            {/* LEFT */}
-            <section style={{ flex: "1 1 320px" }}>
-              <h2>Events</h2>
+        <div style={{ display: "flex", gap: 24, marginTop: 16, flexWrap: "wrap" }}>
+          {/* LEFT */}
+          <section style={{ flex: "1 1 320px" }}>
+            <h2>Events</h2>
 
-              {events.length === 0 ? (
-                <p>Geen events. Maak er 1 aan.</p>
+            {events.length === 0 ? (
+              <p>Geen events. Importeer de kalender.</p>
+            ) : (
+              <select
+                value={selectedEventId}
+                onChange={(e) => setSelectedEventId(e.target.value)}
+                style={{ width: "100%", padding: 8 }}
+              >
+                {events.map((e) => (
+                  <option key={e.id} value={e.id}>
+                    {e.name} {e.starts_at ? `(${fmtLocal(e.starts_at)})` : ""}
+                  </option>
+                ))}
+              </select>
+            )}
+
+            {selectedEvent ? (
+              <div style={{ marginTop: 10, fontSize: 13, opacity: 0.85 }}>
+                <div>
+                  <strong>Gekozen event:</strong> {selectedEvent.name}
+                </div>
+                <div>
+                  <strong>Start:</strong> {selectedEvent.starts_at ? fmtLocal(selectedEvent.starts_at) : "—"}{" "}
+                  {selectedEvent.format ? ` • ${selectedEvent.format}` : ""}
+                </div>
+              </div>
+            ) : null}
+
+            <div style={{ marginTop: 16 }}>
+              <h3>Sessies</h3>
+
+              {sessions.length === 0 ? (
+                <p style={{ opacity: 0.8 }}>Geen sessies voor dit event (import?).</p>
               ) : (
                 <select
-                  value={selectedEventId}
-                  onChange={(e) => setSelectedEventId(e.target.value)}
+                  value={selectedSessionId}
+                  onChange={(e) => setSelectedSessionId(e.target.value)}
                   style={{ width: "100%", padding: 8 }}
                 >
-                  {events.map((e) => (
-                    <option key={e.id} value={e.id}>
-                      {e.name} {e.starts_at ? `(${e.starts_at})` : ""}
+                  {sessions.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} {s.session_key ? `(${s.session_key})` : ""} — {fmtLocal(s.starts_at)}
                     </option>
                   ))}
                 </select>
               )}
 
-              {selectedEvent ? (
+              {selectedSession ? (
                 <div style={{ marginTop: 10, fontSize: 13, opacity: 0.85 }}>
                   <div>
-                    <strong>Gekozen event:</strong> {selectedEvent.name}
+                    <strong>Sessie:</strong> {selectedSession.name}{" "}
+                    {selectedSession.session_key ? `(${selectedSession.session_key})` : ""}
                   </div>
                   <div>
-                    <strong>Start:</strong> {selectedEvent.starts_at ? fmtLocal(selectedEvent.starts_at) : "—"}
-                    {selectedEvent.format ? ` • ${selectedEvent.format}` : ""}
+                    <strong>Start:</strong> {fmtLocal(selectedSession.starts_at)}
+                  </div>
+                  <div>
+                    <strong>Lock:</strong> {fmtLocal(selectedSession.lock_at)}
                   </div>
                 </div>
               ) : null}
 
-              <div style={{ marginTop: 16 }}>
-                <h3>Sessies</h3>
-
-                {sessions.length === 0 ? (
-                  <p style={{ opacity: 0.8 }}>Geen sessies voor dit event (import?).</p>
-                ) : (
-                  <select
-                    value={selectedSessionId}
-                    onChange={(e) => setSelectedSessionId(e.target.value)}
-                    style={{ width: "100%", padding: 8 }}
-                  >
-                    {sessions.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name} ({s.session_key}) — {fmtLocal(s.starts_at)}
-                      </option>
-                    ))}
-                  </select>
-                )}
-
-                {selectedSession ? (
-                  <div style={{ marginTop: 10, fontSize: 13, opacity: 0.85 }}>
-                    <div>
-                      <strong>Sessie:</strong> {selectedSession.name} ({selectedSession.session_key})
-                    </div>
-                    <div>
-                      <strong>Start:</strong> {fmtLocal(selectedSession.starts_at)}
-                    </div>
-                    <div>
-                      <strong>Lock:</strong> {fmtLocal(selectedSession.lock_at)}
-                    </div>
-                  </div>
-                ) : null}
-
-                <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
-                  <button onClick={clearSession} disabled={saving || !selectedSessionId}>
-                    Leegmaken
-                  </button>
-                  <button onClick={saveResultsForSession} disabled={saving || !selectedSessionId}>
-                    {saving ? "Opslaan…" : "Sessie results opslaan"}
-                  </button>
-                </div>
-
-                <div style={{ marginTop: 24 }}>
-                  <button onClick={() => router.replace("/pools")}>Terug naar pools</button>
-                  <button onClick={logout} style={{ marginLeft: 8 }}>
-                    Logout
-                  </button>
-                </div>
+              <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+                <button onClick={clearSession} disabled={saving || !selectedSessionId}>
+                  Leegmaken
+                </button>
+                <button onClick={saveResultsForSession} disabled={saving || !selectedSessionId}>
+                  {saving ? "Opslaan..." : "Sessie results opslaan"}
+                </button>
               </div>
-            </section>
 
-            {/* RIGHT */}
-            <section style={{ flex: "2 1 520px" }}>
-              <h2>Results: Top 10 (per sessie)</h2>
+              <div style={{ marginTop: 24 }}>
+                <button onClick={() => router.replace("/pools")}>Terug naar pools</button>
+                <button onClick={logout} style={{ marginLeft: 8 }}>
+                  Logout
+                </button>
+              </div>
+            </div>
+          </section>
 
-              <p style={{ marginTop: 6, opacity: 0.85 }}>
-                Opslag gaat naar <code>event_results.result_json.sessions[sessionId].top10</code>
-              </p>
+          {/* RIGHT */}
+          <section style={{ flex: "2 1 520px" }}>
+            <h2>Results: Top 10 (per sessie)</h2>
 
-              <div style={{ marginTop: 14, display: "grid", gap: 8, maxWidth: 720 }}>
-                {top10.map((v, idx) => {
-                  const pos = idx + 1;
-                  return (
-                    <div
-                      key={idx}
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "52px 1fr",
-                        gap: 10,
-                        alignItems: "center",
-                      }}
-                    >
-                      <div style={{ fontWeight: 800 }}>P{pos}</div>
+            <p style={{ marginTop: 6, opacity: 0.85 }}>
+              Opslag gaat naar <code>event_results.result_json.sessions[sessionId].top10</code>
+            </p>
+
+            <div style={{ marginTop: 14, display: "grid", gap: 8, maxWidth: 720 }}>
+              {top10.map((v, idx) => {
+                const pos = idx + 1;
+                const color = v ? getTeamColorByDriverCode(v) : "#999";
+                const selected = F1_DRIVERS_2026.find((d) => d.code === v);
+
+                return (
+                  <div
+                    key={idx}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "52px 1fr",
+                      gap: 10,
+                      alignItems: "center",
+                    }}
+                  >
+                    <div style={{ fontWeight: 800 }}>P{pos}</div>
+
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <span
+                        title={selected?.teamName ?? ""}
+                        style={{
+                          width: 12,
+                          height: 12,
+                          borderRadius: 999,
+                          background: color,
+                          display: "inline-block",
+                          border: "1px solid rgba(0,0,0,0.2)",
+                          flex: "0 0 auto",
+                        }}
+                      />
 
                       <select
-                        value={v}
+                        value={v ?? ""}
                         onChange={(e) => updatePos(idx, e.target.value)}
                         disabled={!selectedSessionId || saving}
                         style={{
@@ -626,136 +614,153 @@ export default function AdminResultsPage() {
                         ))}
                       </select>
                     </div>
-                  );
-                })}
-              </div>
+                  </div>
+                );
+              })}
+            </div>
 
-              <details style={{ marginTop: 16, opacity: 0.9 }}>
-                <summary>Debug: opgeslagen JSON bekijken</summary>
-                <pre style={{ marginTop: 10, padding: 12, background: "#f7f7f7", borderRadius: 10, overflowX: "auto" }}>
-                  {JSON.stringify(eventResultsRow?.result_json ?? {}, null, 2)}
-                </pre>
-              </details>
-            </section>
-          </div>
+            <details style={{ marginTop: 16, opacity: 0.9 }}>
+              <summary>Debug: opgeslagen JSON bekijken</summary>
+              <pre
+                style={{
+                  marginTop: 10,
+                  padding: 12,
+                  background: "#f7f7f7",
+                  borderRadius: 10,
+                  overflowX: "auto",
+                }}
+              >
+                {JSON.stringify(eventResultsRow?.result_json ?? {}, null, 2)}
+              </pre>
+            </details>
+          </section>
         </div>
       )}
 
-      {/* =========================
-          TAB: SEASON BONUS
-         ========================= */}
       {tab === "season" && (
-        <div style={{ marginTop: 18 }}>
+        <section style={{ marginTop: 16, maxWidth: 900 }}>
           <h2>Season Bonus</h2>
 
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              Season:
-              <input
-                type="number"
-                value={seasonYear}
-                onChange={(e) => setSeasonYear(parseInt(e.target.value || "2026", 10))}
-                style={{ width: 120, padding: 8 }}
-              />
-            </label>
-
-            <button onClick={() => loadSeasonBonus(seasonYear)} disabled={seasonLoading || seasonSaving}>
-              {seasonLoading ? "Loading…" : "Refresh"}
+          <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center" }}>
+            <label>Season:</label>
+            <input
+              value={seasonYear}
+              onChange={(e) => setSeasonYear(parseInt(e.target.value || "0", 10))}
+              style={{ width: 120, padding: 8 }}
+            />
+            <button onClick={loadSeasonBonus} disabled={saving}>
+              Refresh
             </button>
           </div>
 
-          {seasonMsg ? (
-            <p style={{ marginTop: 12, color: seasonMsg.startsWith("✅") ? "green" : "crimson" }}>{seasonMsg}</p>
-          ) : null}
+          <p style={{ marginTop: 10, opacity: 0.8 }}>
+            Bron: <code>bonus_question_bank</code> (scope=season) + <code>season_official_answers</code>.
+          </p>
 
-          {seasonLoading ? (
-            <p style={{ marginTop: 12 }}>Loading season questions…</p>
-          ) : seasonQuestions.length === 0 ? (
-            <p style={{ marginTop: 12, opacity: 0.8 }}>No season questions found. (Insert scope='season' questions into bonus_question_bank.)</p>
+          {seasonQuestions.length === 0 ? (
+            <p style={{ marginTop: 12, opacity: 0.85 }}>
+              No season questions found. Seed them in <code>bonus_question_bank</code>.
+            </p>
           ) : (
-            <div style={{ marginTop: 14 }}>
+            <div style={{ marginTop: 16, display: "grid", gap: 14 }}>
               {seasonQuestions.map((q) => {
-                const current = seasonAnswers[q.question_key] ?? null;
+                const qKey = q.question_key ?? q.id; // fallback
+                const current = seasonOfficialAnswers[qKey] ?? null;
+
+                const kind = q.answer_kind;
 
                 return (
                   <div
-                    key={q.id}
+                    key={qKey}
                     style={{
-                      border: "1px solid #ddd",
+                      border: "1px solid #e5e5e5",
                       borderRadius: 12,
-                      padding: 12,
-                      marginTop: 12,
+                      padding: 14,
+                      background: "white",
                     }}
                   >
-                    <div style={{ fontWeight: 700 }}>{q.prompt}</div>
-                    <div style={{ fontSize: 12, opacity: 0.75, marginTop: 4 }}>
-                      key: <code>{q.question_key}</code> · kind: <code>{q.answer_kind}</code>
+                    <div style={{ fontWeight: 800 }}>{q.prompt}</div>
+                    <div style={{ marginTop: 4, fontSize: 12, opacity: 0.7 }}>
+                      key: <code>{q.question_key ?? "— (missing)"}</code> · kind: <code>{kind}</code>
                     </div>
 
-                    <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                      {q.answer_kind === "boolean" ? (
-                        <>
-                          <button onClick={() => setSeasonOfficialAnswer(seasonYear, q, true)} disabled={seasonSaving}>
-                            Set YES
-                          </button>
-                          <button onClick={() => setSeasonOfficialAnswer(seasonYear, q, false)} disabled={seasonSaving}>
-                            Set NO
-                          </button>
-                        </>
-                      ) : q.answer_kind === "driver" ? (
-                        <select
-                          value={typeof current === "string" ? current : ""}
-                          disabled={seasonSaving}
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            if (!v) return;
-                            setSeasonOfficialAnswer(seasonYear, q, v);
-                          }}
-                          style={{ padding: 8, minWidth: 320 }}
-                        >
-                          <option value="">— Select driver —</option>
-                          {F1_DRIVERS_2026.map((d) => (
-                            <option key={d.code} value={d.code}>
-                              {d.code} — {d.name} ({d.teamName})
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <select
-                          value={typeof current === "string" ? current : ""}
-                          disabled={seasonSaving}
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            if (!v) return;
-                            setSeasonOfficialAnswer(seasonYear, q, v);
-                          }}
-                          style={{ padding: 8, minWidth: 320 }}
-                        >
-                          <option value="">— Select team —</option>
-                          {F1_TEAMS_2026.map((t) => (
-                            <option key={t} value={t}>
-                              {t}
-                            </option>
-                          ))}
-                        </select>
-                      )}
+                    <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 160px", gap: 12 }}>
+                      <div>
+                        {kind === "team" && (
+                          <select
+                            value={current ?? ""}
+                            onChange={(e) => saveSeasonOfficialAnswer(qKey, e.target.value || null)}
+                            disabled={saving}
+                            style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #ccc" }}
+                          >
+                            <option value="">— Select team —</option>
+                            {F1_TEAMS_2026.map((t) => (
+                              <option key={t.key} value={t.key}>
+                                {t.name}
+                              </option>
+                            ))}
+                          </select>
+                        )}
 
-                      <div style={{ fontSize: 13, opacity: 0.85 }}>
-                        Current:{" "}
-                        <strong>
-                          {current === null || current === undefined
-                            ? "—"
-                            : typeof current === "boolean"
-                            ? current
-                              ? "YES"
-                              : "NO"
-                            : q.answer_kind === "driver"
-                            ? (() => {
-                                const d = F1_DRIVERS_2026.find((x) => x.code === current);
-                                return d ? `${d.name} (${d.teamName})` : String(current);
-                              })()
-                            : String(current)}
-                        </strong>
+                        {kind === "driver" && (
+                          <select
+                            value={current ?? ""}
+                            onChange={(e) => saveSeasonOfficialAnswer(qKey, e.target.value || null)}
+                            disabled={saving}
+                            style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #ccc" }}
+                          >
+                            <option value="">— Select driver —</option>
+                            {F1_DRIVERS_2026.map((d) => (
+                              <option key={d.code} value={d.code}>
+                                {d.code} — {d.name} ({d.teamName})
+                              </option>
+                            ))}
+                          </select>
+                        )}
+
+                        {kind === "boolean" && (
+                          <select
+                            value={current === true ? "true" : current === false ? "false" : ""}
+                            onChange={(e) =>
+                              saveSeasonOfficialAnswer(qKey, e.target.value === "" ? null : e.target.value === "true")
+                            }
+                            disabled={saving}
+                            style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #ccc" }}
+                          >
+                            <option value="">— Select —</option>
+                            <option value="true">Yes</option>
+                            <option value="false">No</option>
+                          </select>
+                        )}
+
+                        {kind === "number" && (
+                          <input
+                            type="number"
+                            value={current ?? ""}
+                            onChange={(e) =>
+                              saveSeasonOfficialAnswer(qKey, e.target.value === "" ? null : Number(e.target.value))
+                            }
+                            disabled={saving}
+                            style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #ccc" }}
+                          />
+                        )}
+
+                        {kind === "text" && (
+                          <input
+                            value={current ?? ""}
+                            onChange={(e) => saveSeasonOfficialAnswer(qKey, e.target.value || null)}
+                            disabled={saving}
+                            placeholder="Enter text"
+                            style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #ccc" }}
+                          />
+                        )}
+                      </div>
+
+                      <div style={{ fontSize: 13, opacity: 0.9 }}>
+                        <div style={{ fontWeight: 700 }}>Current:</div>
+                        <div style={{ marginTop: 6 }}>
+                          {current === null || current === undefined || current === "" ? "—" : <code>{String(current)}</code>}
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -767,10 +772,15 @@ export default function AdminResultsPage() {
           <details style={{ marginTop: 16, opacity: 0.9 }}>
             <summary>Debug: loaded official answers</summary>
             <pre style={{ marginTop: 10, padding: 12, background: "#f7f7f7", borderRadius: 10, overflowX: "auto" }}>
-              {JSON.stringify(seasonAnswers, null, 2)}
+              {JSON.stringify(seasonOfficialAnswers, null, 2)}
             </pre>
           </details>
-        </div>
+
+          <p style={{ marginTop: 16, fontSize: 13, opacity: 0.8 }}>
+            Tip: als je <code>question_key</code> nog niet hebt in <code>bonus_question_bank</code>, voeg die kolom toe en
+            geef je season vragen vaste keys (bijv. <code>season_driver_champion</code>).
+          </p>
+        </section>
       )}
     </main>
   );
