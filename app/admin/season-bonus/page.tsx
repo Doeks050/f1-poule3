@@ -94,30 +94,29 @@ export default function SeasonBonusAdminPage() {
   ) {
     setMsg(null);
 
-    const { data: sessionData } =
-      await supabase.auth.getSession();
+    const { data: sessionData } = await supabase.auth.getSession();
 
-    const token = sessionData.session?.access_token;
-    if (!token) {
-      setMsg("Geen geldige sessie.");
-      return;
-    }
+const userId = sessionData.session?.user?.id;
+if (!userId) {
+  setMsg("Geen geldige sessie.");
+  return;
+}
 
-    const { error } = await supabase
-      .from("season_official_answers")
-      .upsert({
-        season_year: seasonYear,
-        question_key: question.question_key,
-        correct_answer: value,
-        is_resolved: true,
-        resolved_at: new Date().toISOString(),
-        created_by: sessionData.session.user.id,
-      });
+const { error } = await supabase
+  .from("season_official_answers")
+  .upsert({
+    season_year: seasonYear,
+    question_key: question.question_key,
+    correct_answer: value,
+    is_resolved: true,
+    resolved_at: new Date().toISOString(),
+    created_by: userId,
+  });
 
-    if (error) {
-      setMsg(error.message);
-      return;
-    }
+if (error) {
+  setMsg(error.message);
+  return;
+}
 
     setMsg("✅ Antwoord opgeslagen.");
     await loadData(seasonYear);
