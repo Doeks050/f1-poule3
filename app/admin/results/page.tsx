@@ -475,11 +475,19 @@ export default function AdminResultsPage() {
           </div>
 
           <div style={{ marginTop: 24 }}>
-            <button onClick={() => router.replace("/pools")}>Terug naar pools</button>
-            <button onClick={logout} style={{ marginLeft: 8 }}>
-              Logout
-            </button>
-          </div>
+  <button onClick={() => router.replace("/pools")}>Terug naar pools</button>
+
+  <button
+    onClick={() => router.push("/admin/bonus")}
+    style={{ marginLeft: 8 }}
+  >
+    Bonus vragen
+  </button>
+
+  <button onClick={logout} style={{ marginLeft: 8 }}>
+    Logout
+  </button>
+</div>
         </section>
 
         {/* RIGHT */}
