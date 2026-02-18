@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { supabase } from "../../../lib/supabaseClient";
+import { F1_DRIVERS_2026 } from "../../../lib/f1_2026";
+
 
 /**
  * NOTE:
@@ -30,12 +32,10 @@ type SessionRow = {
 };
 
 type EventResultsRow = {
-  // Some older schemas do NOT have `id`. We only rely on event_id.
-  id?: string;
   event_id: string;
   result_json: any;
-  created_at?: string;
-  updated_at?: string;
+  created_at: string;
+  updated_at: string;
 };
 
 type BonusQuestionRow = {
@@ -57,7 +57,6 @@ type SeasonOfficialAnswerRow = {
   updated_at?: string;
 };
 
-type DriverOpt = { code: string; name: string; teamName: string };
 type TeamOpt = { key: string; name: string };
 
 const F1_TEAMS_2026: TeamOpt[] = [
@@ -72,15 +71,6 @@ const F1_TEAMS_2026: TeamOpt[] = [
   { key: "RACING_BULLS", name: "Racing Bulls" },
   { key: "AUDI", name: "Audi" },
   { key: "CADILLAC", name: "Cadillac" },
-];
-
-/**
- * Fill this list with your definitive 2026 line-up.
- * The UI uses `code` as the stored value (e.g. "VER").
- */
-const F1_DRIVERS_2026: DriverOpt[] = [
-  // Example:
-  // { code: "VER", name: "Max Verstappen", teamName: "Red Bull" },
 ];
 
 function fmtLocal(iso: string | null) {
@@ -244,7 +234,7 @@ export default function AdminResultsPage() {
       // IMPORTANT: do NOT select "id" because some schemas don't have it.
       const rRes = await supabase
         .from("event_results")
-        .select("event_id,result_json,created_at,updated_at")
+        .select("event_id, result_json, created_at, updated_at")
         .eq("event_id", selectedEventId)
         .maybeSingle();
 
