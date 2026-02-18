@@ -2,8 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { supabase } from "../../lib/supabaseClient";
-import { F1_DRIVERS_2026 } from "../../lib/f1_2026";
+import { supabase } from "../../../lib/supabaseClient";
+import { F1_DRIVERS_2026 } from "../../../lib/f1_2026";
 
 type BonusQuestionRow = {
   id: string;
