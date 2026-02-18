@@ -95,6 +95,7 @@ function validateTop10(arr: string[]) {
 }
 
 export default function AdminResultsPage() {
+  const [tab, setTab] = useState<"sessions" | "weekend" | "season">("sessions");
   const router = useRouter();
 
   const [loading, setLoading] = useState(true);
@@ -358,6 +359,26 @@ export default function AdminResultsPage() {
     return (
       <main style={{ padding: 16 }}>
         <h1>Admin Results</h1>
+              <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
+        <button
+          onClick={() => setTab("sessions")}
+          style={{ fontWeight: tab === "sessions" ? 800 : 400 }}
+        >
+          Session Results
+        </button>
+        <button
+          onClick={() => setTab("weekend")}
+          style={{ fontWeight: tab === "weekend" ? 800 : 400 }}
+        >
+          Weekend Bonus
+        </button>
+        <button
+          onClick={() => setTab("season")}
+          style={{ fontWeight: tab === "season" ? 800 : 400 }}
+        >
+          Season Bonus
+        </button>
+      </div>
         <p>Loading…</p>
       </main>
     );
@@ -378,6 +399,40 @@ export default function AdminResultsPage() {
       <h1>Admin Results</h1>
       <p>Ingelogd als: {email}</p>
 
+      <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+  <button
+    onClick={() => setTab("sessions")}
+    style={{
+      padding: "8px 10px",
+      borderRadius: 10,
+      border: "1px solid #ccc",
+      background: tab === "sessions" ? "#111" : "white",
+      color: tab === "sessions" ? "white" : "#111",
+      fontWeight: 800,
+      cursor: "pointer",
+    }}
+  >
+    Sessies
+  </button>
+
+  <button
+    onClick={() => setTab("season")}
+    style={{
+      padding: "8px 10px",
+      borderRadius: 10,
+      border: "1px solid #ccc",
+      background: tab === "season" ? "#111" : "white",
+      color: tab === "season" ? "white" : "#111",
+      fontWeight: 800,
+      cursor: "pointer",
+    }}
+  >
+    Season bonus
+  </button>
+</div>
+
+           {tab === "sessions" && (
+        <>
       <div style={{ display: "flex", gap: 24, marginTop: 16, flexWrap: "wrap" }}>
         {/* LEFT */}
         <section style={{ flex: "1 1 320px" }}>
@@ -559,6 +614,19 @@ export default function AdminResultsPage() {
           </details>
         </section>
       </div>
+
+      </>
+      )}
+
+      {tab === "season" && (
+  <div style={{ marginTop: 16 }}>
+    <h2>Season Bonus</h2>
+    <p style={{ opacity: 0.8 }}>
+      Placeholder. Hier komt straks de admin UI voor de 3 seizoensvragen.
+    </p>
+  </div>
+)}
+
     </main>
   );
 }
