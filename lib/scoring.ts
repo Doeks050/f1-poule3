@@ -17,39 +17,19 @@ export function normalizeTop10(input: any): string[] | null {
 }
 
 export function pointsPerCorrectPosition(sessionKey: string): number {
-  const k = (sessionKey ?? "").toLowerCase().trim();
+  const k = (sessionKey ?? "").toLowerCase();
 
   // FP
   if (k === "fp1" || k === "fp2" || k === "fp3") return 1;
 
-  // Sprint Quali / Sprint Qualifying
-  if (
-    k === "sprint_quali" ||
-    k === "sprintquali" ||
-    k === "sprint_qualifying" ||
-    k === "sprintqualifying" ||
-    k === "sq"
-  )
-    return 3;
+  // Sprint Quali
+  if (k === "sprint_quali" || k === "sprintquali" || k === "sq") return 3;
 
-  // Quali / Qualifying / Qualification
-  if (
-    k === "qual1" ||
-    k === "q" ||
-    k === "quali" ||
-    k === "qualifying" ||
-    k === "qualification"
-  )
-    return 3;
+  // Quali
+  if (k === "qual1" || k === "q" || k === "quali" || k === "qualifying") return 3;
 
   // Sprint Race
-  if (
-    k === "sprint_race" ||
-    k === "sprintrace" ||
-    k === "sprint" || // als jij sprint als key gebruikt
-    k === "sr"
-  )
-    return 4;
+  if (k === "sprint_race" || k === "sprintrace" || k === "sr") return 4;
 
   // Race
   if (k === "race" || k === "r") return 5;
@@ -67,11 +47,6 @@ function countCorrectPositions(pred: string[], res: string[]): number {
 
 /**
  * Score = (#correcte posities) * (punten per correcte positie)
- *
- * - FP: max 10
- * - Sprint/quali: max 30
- * - Sprint race: max 40
- * - Race: max 50
  */
 export function pointsForSession(
   sessionKey: string,
@@ -87,68 +62,72 @@ export function pointsForSession(
 }
 
 // ------------------------------
-// Weekend bonusvragen (5 punten per correct)
-// Werkt met:
-// - jsonb boolean: true/false
-// - of json object: { value: true/false }
+// Bonus answers mapping helpers
+// (werkt met jsonb die óf true/false is, óf { value: true/false/null })
 // ------------------------------
-function toBool(v: any): boolean | null {
-  if (typeof v === "boolean") return v;
-  if (v && typeof v === "object" && typeof v.value === "boolean") return v.value;
-  return null;
+export type AnswerRow = {
+  question_id: string;
+  answer_json: any;
+};
+
+function extractBoolean(answer_json: any): boolean | undefined {
+  // Case A: jsonb is direct boolean
+  if (typeof answer_json === "boolean") return answer_json;
+
+  // Case B: jsonb is { value: boolean|null }
+  if (answer_json && typeof answer_json === "object" && "value" in answer_json) {
+    if (typeof answer_json.value === "boolean") return answer_json.value;
+    return undefined; // null/undefined => geen officieel antwoord of geen user antwoord
+  }
+
+  // Case C: soms string "true"/"false"
+  if (typeof answer_json === "string") {
+    const v = answer_json.trim().toLowerCase();
+    if (v === "true") return true;
+    if (v === "false") return false;
+  }
+
+  return undefined;
 }
 
-// Map rows -> Record<question_id, answer_json>
 export function mapAnswersByQuestionId(
-  rows:
-    | Array<{ question_id: string; answer_json: any }>
-    | null
-    | undefined
-): Record<string, any> | null {
-  if (!rows || rows.length === 0) return null;
-
-  const out: Record<string, any> = {};
-  for (const r of rows) {
-    if (r?.question_id) out[r.question_id] = r.answer_json;
+  rows: AnswerRow[] | null | undefined
+): Record<string, boolean | undefined> {
+  const out: Record<string, boolean | undefined> = {};
+  for (const r of rows ?? []) {
+    if (!r?.question_id) continue;
+    out[r.question_id] = extractBoolean(r.answer_json);
   }
   return out;
 }
 
-export function pointsForWeekendBonus(
-  userAnswers: Record<string, any> | null,
-  correctAnswers: Record<string, any> | null
+// ------------------------------
+// Weekend bonusvragen (5 punten per correct)
+// Verwacht Records met booleans (true/false) of undefined (geen antwoord)
+// ------------------------------
+export function pointsForWeekendBonusAnswers(
+  userAnswers: Record<string, boolean | undefined> | null,
+  correctAnswers: Record<string, boolean | undefined> | null
 ): number {
   if (!userAnswers || !correctAnswers) return 0;
 
   let points = 0;
 
   for (const qid of Object.keys(correctAnswers)) {
-    const u = toBool(userAnswers[qid]);
-    const c = toBool(correctAnswers[qid]);
+    const u = userAnswers[qid];
+    const c = correctAnswers[qid];
 
-    // Alleen scoren als beiden echt boolean zijn
-    if (u !== null && c !== null && u === c) points += 5;
+    // Alleen score als beide echt boolean zijn
+    if (typeof u === "boolean" && typeof c === "boolean") {
+      if (u === c) points += 5;
+    }
   }
 
   return points;
 }
 
-// Convenience wrapper (deze verwacht precies wat je uit Supabase select haalt)
-export function pointsForWeekendBonusAnswers(
-  userRows:
-    | Array<{ question_id: string; answer_json: any }>
-    | null
-    | undefined,
-  officialRows:
-    | Array<{ question_id: string; answer_json: any }>
-    | null
-    | undefined
-): number {
-  return pointsForWeekendBonus(
-    mapAnswersByQuestionId(userRows),
-    mapAnswersByQuestionId(officialRows)
-  );
-}
+// Backwards-compatible alias (als je route.ts nog pointsForWeekendBonus gebruikt)
+export const pointsForWeekendBonus = pointsForWeekendBonusAnswers;
 
 // ------------------------------
 // Season champion vragen (50 punten)
@@ -158,15 +137,11 @@ export function pointsForSeasonChampion(
   correctValue: string | null
 ): number {
   if (!userPick || !correctValue) return 0;
-
-  return userPick.trim().toUpperCase() === correctValue.trim().toUpperCase()
-    ? 50
-    : 0;
+  return userPick.trim().toUpperCase() === correctValue.trim().toUpperCase() ? 50 : 0;
 }
 
 // ------------------------------
 // Season: "Welke coureur wint minstens 1 GP?"
-// Variabele punten op basis van risico.
 // ------------------------------
 export function pointsForSeasonWinPick(
   userPick: string | null,
@@ -178,8 +153,8 @@ export function pointsForSeasonWinPick(
   const pick = userPick.trim().toUpperCase();
   const winnersUpper = raceWinners.map((x) => (x ?? "").trim().toUpperCase());
   const hasWon = winnersUpper.includes(pick);
-
   if (!hasWon) return 0;
+
   return winPickPoints[pick] ?? 0;
 }
 
@@ -190,12 +165,10 @@ export const DEFAULT_WIN_PICK_POINTS: Record<string, number> = {
   NORRIS: 12,
   RUSSELL: 14,
   PIASTRI: 16,
-
   SAINZ: 20,
   ALONSO: 22,
   GASLY: 28,
   OCON: 30,
-
   TSUNODA: 35,
   ALBON: 40,
   HULKENBERG: 50,
