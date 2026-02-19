@@ -311,7 +311,7 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
             if (qid in userMap) userFiltered[qid] = userMap[qid];
           }
 
-          row.total_points += pointsForWeekendBonus(userFiltered, correctFiltered);
+          row.total_points += pointsForWeekendBonusAnswers(userFiltered, correctFiltered);
         }
       }
     }
