@@ -7,7 +7,7 @@ import {
   normalizeTop10,
   pointsForWeekendBonusAnswers,
   mapAnswersByQuestionId,
-} from "../../../../../lib/scoring";
+} from "../../../../lib/scoring";
 
 export const runtime = "nodejs";
 
@@ -311,7 +311,7 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
             if (qid in userMap) userFiltered[qid] = userMap[qid];
           }
 
-          row.total_points += pointsForWeekendBonusAnswers(userFiltered, correctFiltered);
+          row.total_points += pointsForWeekendBonus(userFiltered, correctFiltered);
         }
       }
     }
