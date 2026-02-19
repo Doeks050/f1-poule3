@@ -70,6 +70,12 @@ export function pointsForSession(
 // Weekend bonusvragen (5 punten per correct)
 // Verwacht booleans (true/false) of null/undefined.
 // ------------------------------
+function toBool(v: any): boolean | null {
+  if (typeof v === "boolean") return v;
+  if (v && typeof v === "object" && typeof v.value === "boolean") return v.value;
+  return null;
+}
+
 export function pointsForWeekendBonus(
   userAnswers: Record<string, any> | null,
   correctAnswers: Record<string, any> | null
@@ -79,10 +85,11 @@ export function pointsForWeekendBonus(
   let points = 0;
 
   for (const qid of Object.keys(correctAnswers)) {
-    // Alleen scoren als user daadwerkelijk antwoord heeft (true/false)
-    if (typeof userAnswers[qid] === "boolean" && typeof correctAnswers[qid] === "boolean") {
-      if (userAnswers[qid] === correctAnswers[qid]) points += 5;
-    }
+    const u = toBool(userAnswers[qid]);
+    const c = toBool(correctAnswers[qid]);
+
+    // Alleen scoren als beiden echt boolean zijn
+    if (u !== null && c !== null && u === c) points += 5;
   }
 
   return points;
