@@ -1,187 +1,231 @@
 // lib/scoring.ts
 
+export type SessionKind = "fp" | "quali" | "sprint" | "race";
+
+export type Top10 = string[];
+
 /**
- * Top10 format:
- * - exactly 10 entries
- * - driver codes uppercase (e.g. "VER")
- * - empty string allowed while editing, but for scoring we require a non-null top10 array
+ * Normaliseert een Top10 array naar:
+ * - trimmed strings
+ * - uppercase
+ * - max 10 entries
  */
-
-export function normalizeTop10(input: any): string[] | null {
-  if (!Array.isArray(input) || input.length !== 10) return null;
-
-  const arr = input.map((x) =>
-    typeof x === "string" ? x.trim().toUpperCase().replace(/\s+/g, "") : ""
-  );
-
-  // If all empty -> treat as "no top10"
-  if (arr.every((x) => x === "")) return null;
-
-  return arr;
+export function normalizeTop10(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .map((x) => (typeof x === "string" ? x.trim().toUpperCase() : ""))
+    .filter(Boolean)
+    .slice(0, 10);
 }
 
-export function pointsPerCorrectPosition(sessionKey: string): number {
-  const k = (sessionKey ?? "").toLowerCase();
-
-  // FP
-  if (k === "fp1" || k === "fp2" || k === "fp3") return 1;
-
-  // Sprint Quali
-  if (k === "sprint_quali" || k === "sprintquali" || k === "sq") return 3;
-
-  // Quali
-  if (k === "quali" || k === "q") return 3;
-
-  // Sprint Race
-  if (k === "sprint_race" || k === "sprintrace" || k === "sr") return 4;
-
-  // Race
-  if (k === "race" || k === "r") return 5;
-
-  return 0;
-}
-
-function countCorrectPositions(pred: string[], res: string[]): number {
+/** Aantal posities exact correct (index match) */
+export function countCorrectPositions(a: string[], b: string[]): number {
+  const n = Math.min(a.length, b.length, 10);
   let correct = 0;
-  for (let i = 0; i < 10; i++) {
-    if ((pred[i] ?? "") !== "" && pred[i] === res[i]) correct++;
+  for (let i = 0; i < n; i++) {
+    if (a[i] && b[i] && a[i] === b[i]) correct++;
   }
   return correct;
 }
 
+function pointsPerCorrectPosition(sessionKind: SessionKind): number {
+  // Pas dit aan als je andere waardes wil.
+  // (Dit volgt jouw bestaande opzet: Race zwaarder dan quali/fp)
+  switch (sessionKind) {
+    case "race":
+      return 5;
+    case "sprint":
+      return 3;
+    case "quali":
+      return 2;
+    case "fp":
+    default:
+      return 1;
+  }
+}
+
 /**
- * Score = (#correct positions) * (points per correct position)
- * - FP: max 10
- * - Sprint/Quali: max 30
- * - Sprint race: max 40
- * - Race: max 50
+ * Core scoring voor één session (Top10 voorspelling vs resultaat)
  */
 export function pointsForSession(
-  sessionKey: string,
-  predTop10: string[] | null,
-  resultTop10: string[] | null
+  sessionKind: SessionKind,
+  predTop10: unknown,
+  resultTop10: unknown
 ): number {
-  const ppc = pointsPerCorrectPosition(sessionKey);
-  if (ppc <= 0) return 0;
-  if (!predTop10 || !resultTop10) return 0;
+  const pred = normalizeTop10(predTop10);
+  const res = normalizeTop10(resultTop10);
 
-  const correct = countCorrectPositions(predTop10, resultTop10);
-  return correct * ppc;
+  const correct = countCorrectPositions(pred, res);
+  return correct * pointsPerCorrectPosition(sessionKind);
 }
 
-/* ------------------------------------------------------------
- * BONUS SCORING
- * ------------------------------------------------------------
- * We score bonus based on:
- * - answer_json: what users answered
- * - correct_json: what admin marked as correct
- *
- * Convention (recommended):
- * - Weekend bonus: 3 yes/no questions per weekend-set
- *   answer_json = { "<questionId>": true/false }
- *   correct_json = { "<questionId>": true/false }
- *
- * - Season bonus: 3 questions for the season
- *   answer_json = { "q_driverChampion": "VER", "q_teamChampion": "MCL", "q_firstTimeWinner": "ANT" }
- *   correct_json = same keys/values
- *
- * Points:
- * - Weekend: 5 per correct answer (your latest rule)
- * - Season: 50 per correct answer
+// ------------------------------------
+// Bonus answers helpers (jsonb parsing)
+// ------------------------------------
+
+/**
+ * Supabase jsonb kan in je tables voorkomen als:
+ * - true/false (primitive jsonb)
+ * - { value: true/false/"text"/null }
+ * - null
  */
+export function extractAnswerValue(answerJson: any): any {
+  if (answerJson === null || answerJson === undefined) return null;
 
-export const WEEKEND_BONUS_POINTS_PER_CORRECT = 5;
-export const SEASON_BONUS_POINTS_PER_CORRECT = 50;
+  // jsonb primitive
+  if (typeof answerJson === "boolean") return answerJson;
+  if (typeof answerJson === "number") return answerJson;
+  if (typeof answerJson === "string") return answerJson;
 
-function isPlainObject(v: any) {
-  return v && typeof v === "object" && !Array.isArray(v);
+  // jsonb object: { value: ... }
+  if (typeof answerJson === "object" && "value" in answerJson) {
+    return (answerJson as any).value ?? null;
+  }
+
+  // fallback
+  return answerJson;
 }
 
-function normStr(v: any): string {
-  return String(v ?? "")
-    .trim()
-    .toUpperCase()
-    .replace(/\s+/g, "");
-}
+export type QArow = {
+  question_id: string;
+  answer_json: any;
+};
 
-function normBool(v: any): boolean | null {
-  if (v === true || v === false) return v;
-  if (typeof v === "string") {
-    const s = v.trim().toLowerCase();
-    if (s === "true" || s === "yes" || s === "ja") return true;
-    if (s === "false" || s === "no" || s === "nee") return false;
+/**
+ * Zet rows (question_id, answer_json) om naar map:
+ * { [questionId]: extractedValue }
+ */
+export function buildAnswerMap(rows: QArow[] | null | undefined): Record<string, any> {
+  const out: Record<string, any> = {};
+  if (!rows) return out;
+
+  for (const r of rows) {
+    if (!r?.question_id) continue;
+    out[r.question_id] = extractAnswerValue(r.answer_json);
   }
-  if (typeof v === "number") {
-    if (v === 1) return true;
-    if (v === 0) return false;
-  }
-  return null;
+  return out;
 }
 
 /**
- * Weekend bonus scoring:
- * - only scores keys that exist in correct_json
- * - expects boolean answers
+ * Filter een answerMap naar alleen de geselecteerde questionIds (bijv. die 3 uit de set).
  */
-export function scoreWeekendBonus(
-  answerJson: any,
-  correctJson: any,
-  pointsPerCorrect = WEEKEND_BONUS_POINTS_PER_CORRECT
-): { points: number; correctCount: number; totalCount: number } {
-  if (!isPlainObject(answerJson) || !isPlainObject(correctJson)) {
-    return { points: 0, correctCount: 0, totalCount: 0 };
+export function pickSelectedAnswerMap(
+  answerMap: Record<string, any>,
+  selectedQuestionIds: string[]
+): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const qid of selectedQuestionIds) {
+    if (qid in answerMap) out[qid] = answerMap[qid];
+  }
+  return out;
+}
+
+// ------------------------------------
+// Weekend bonus scoring (3 vragen, 5 pnt per correct)
+// ------------------------------------
+
+/**
+ * Weekend bonus: 5 punten per correct antwoord.
+ * Verwacht maps: { [questionId]: boolean/string/... }
+ *
+ * Belangrijk:
+ * - We scoren alleen als user echt heeft geantwoord (true/false of string),
+ *   dus null/undefined telt niet mee.
+ */
+export function pointsForWeekendBonus(
+  userAnswers: Record<string, any> | null,
+  correctAnswers: Record<string, any> | null
+): number {
+  if (!userAnswers || !correctAnswers) return 0;
+
+  let points = 0;
+
+  for (const qid of Object.keys(correctAnswers)) {
+    const u = userAnswers[qid];
+    const c = correctAnswers[qid];
+
+    if (u === null || u === undefined) continue;
+    if (c === null || c === undefined) continue;
+
+    // boolean
+    if (typeof u === "boolean" && typeof c === "boolean") {
+      if (u === c) points += 5;
+      continue;
+    }
+
+    // string compare (case-insensitive)
+    if (typeof u === "string" && typeof c === "string") {
+      if (u.trim().toUpperCase() === c.trim().toUpperCase()) points += 5;
+      continue;
+    }
+
+    // number compare
+    if (typeof u === "number" && typeof c === "number") {
+      if (u === c) points += 5;
+      continue;
+    }
+
+    // fallback strict equality
+    if (u === c) points += 5;
   }
 
-  let correctCount = 0;
-  let totalCount = 0;
+  return points;
+}
 
-  for (const qid of Object.keys(correctJson)) {
-    const c = normBool((correctJson as any)[qid]);
-    if (c === null) continue; // skip invalid admin entry
-    totalCount++;
+// ------------------------------------
+// Season bonus helpers (optioneel)
+// ------------------------------------
 
-    const a = normBool((answerJson as any)[qid]);
-    if (a === null) continue; // user didn't answer (or invalid)
-    if (a === c) correctCount++;
-  }
-
-  return {
-    points: correctCount * pointsPerCorrect,
-    correctCount,
-    totalCount,
-  };
+/**
+ * Season champion vraag (bijv. 50 punten) – simpele equality.
+ */
+export function pointsForSeasonChampion(
+  userPick: string | null | undefined,
+  correctPick: string | null | undefined,
+  points = 50
+): number {
+  if (!userPick || !correctPick) return 0;
+  if (userPick.trim().toUpperCase() === correctPick.trim().toUpperCase()) return points;
+  return 0;
 }
 
 /**
- * Season bonus scoring:
- * - compares string answers (normalized)
- * - only scores keys that exist in correct_json
+ * “Race winner pick” (underdog points) – gebruikt mapping.
  */
-export function scoreSeasonBonus(
-  answerJson: any,
-  correctJson: any,
-  pointsPerCorrect = SEASON_BONUS_POINTS_PER_CORRECT
-): { points: number; correctCount: number; totalCount: number } {
-  if (!isPlainObject(answerJson) || !isPlainObject(correctJson)) {
-    return { points: 0, correctCount: 0, totalCount: 0 };
-  }
+export function pointsForWinPick(
+  userPick: string | null | undefined,
+  raceWinners: (string | null | undefined)[] | null | undefined,
+  winPickPoints: Record<string, number> | null | undefined
+): number {
+  if (!userPick || !raceWinners || !winPickPoints) return 0;
 
-  let correctCount = 0;
-  let totalCount = 0;
+  const pick = userPick.trim().toUpperCase();
+  const winnersUpper = raceWinners.map((x) => (x ?? "").trim().toUpperCase());
+  const hasWon = winnersUpper.includes(pick);
 
-  for (const key of Object.keys(correctJson)) {
-    const c = normStr((correctJson as any)[key]);
-    if (!c) continue;
-    totalCount++;
-
-    const a = normStr((answerJson as any)[key]);
-    if (!a) continue;
-    if (a === c) correctCount++;
-  }
-
-  return {
-    points: correctCount * pointsPerCorrect,
-    correctCount,
-    totalCount,
-  };
+  if (!hasWon) return 0;
+  return winPickPoints[pick] ?? 0;
 }
+
+/**
+ * Default mapping (OPTIONEEL) – liever uit DB halen.
+ * Zet alle keys UPPERCASE.
+ */
+export const DEFAULT_WIN_PICK_POINTS: Record<string, number> = {
+  VERSTAPPEN: 5,
+  HAMILTON: 8,
+  LECLERC: 10,
+  NORRIS: 12,
+  RUSSELL: 14,
+  PIASTRI: 16,
+  SAINZ: 20,
+  ALONSO: 22,
+  GASLY: 28,
+  OCON: 30,
+  TSUNODA: 35,
+  ALBON: 38,
+  HULKENBERG: 40,
+  STROLL: 45,
+  MAGNUSSEN: 50,
+  // Voeg hier de rest toe of laad dit uit Supabase (drivers table) + admin input.
+};
