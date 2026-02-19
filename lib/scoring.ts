@@ -1,8 +1,11 @@
 // lib/scoring.ts
 
-// ==============================
-// Top10 helpers (BESTAAND)
-// ==============================
+/**
+ * Top10 format:
+ * - exactly 10 entries
+ * - driver codes uppercase (e.g. "VER")
+ * - empty string allowed while editing, but for scoring we require a non-null top10 array
+ */
 
 export function normalizeTop10(input: any): string[] | null {
   if (!Array.isArray(input) || input.length !== 10) return null;
@@ -11,7 +14,7 @@ export function normalizeTop10(input: any): string[] | null {
     typeof x === "string" ? x.trim().toUpperCase().replace(/\s+/g, "") : ""
   );
 
-  // Als alles leeg is: behandelen als "geen top10"
+  // If all empty -> treat as "no top10"
   if (arr.every((x) => x === "")) return null;
 
   return arr;
@@ -47,7 +50,7 @@ function countCorrectPositions(pred: string[], res: string[]): number {
 }
 
 /**
- * Score = (#correcte posities) * (punten per correcte positie)
+ * Score = (#correct positions) * (points per correct position)
  * - FP: max 10
  * - Sprint/Quali: max 30
  * - Sprint race: max 40
@@ -66,169 +69,119 @@ export function pointsForSession(
   return correct * ppc;
 }
 
-// ==============================
-// Bonus scoring (NIEUW)
-// ==============================
-
-// Weekend bonus: 5 punten per correct antwoord
-export const WEEKEND_BONUS_POINTS_PER_QUESTION = 5;
-
-// Season bonus: 50 punten per correct (champion questions)
-export const SEASON_BONUS_CHAMPION_POINTS = 50;
-
-// Driver win-pick: variabele punten (outsiders meer)
-export const DEFAULT_SEASON_WIN_PICK_POINTS_BY_DRIVER: Record<string, number> = {
-  // Favorieten (laag)
-  VER: 5,
-  NOR: 8,
-  LEC: 10,
-  HAM: 10,
-  RUS: 12,
-  PIA: 12,
-
-  // Sterk middenveld
-  SAI: 16,
-  ALO: 18,
-  PER: 20,
-  GAS: 22,
-  OCO: 22,
-
-  // Outsiders
-  STR: 26,
-  ALB: 28,
-  TSU: 30,
-  HUL: 34,
-  BOT: 34,
-
-  // Long shots
-  ZHO: 40,
-  MAG: 40,
-  SAR: 45,
-};
-
-function normalizeCode(v: any): string {
-  return typeof v === "string" ? v.trim().toUpperCase().replace(/\s+/g, "") : "";
-}
-
-function toBool(v: any): boolean | null {
-  if (typeof v === "boolean") return v;
-
-  // support shapes like { value: true }
-  if (v && typeof v === "object" && typeof v.value === "boolean") return v.value;
-
-  // support shapes like { answer: true }
-  if (v && typeof v === "object" && typeof v.answer === "boolean") return v.answer;
-
-  return null;
-}
-
-/**
- * Accepts multiple shapes:
- * - { "qid": true, "qid2": false }
- * - { answers: { "qid": true } }
+/* ------------------------------------------------------------
+ * BONUS SCORING
+ * ------------------------------------------------------------
+ * We score bonus based on:
+ * - answer_json: what users answered
+ * - correct_json: what admin marked as correct
+ *
+ * Convention (recommended):
+ * - Weekend bonus: 3 yes/no questions per weekend-set
+ *   answer_json = { "<questionId>": true/false }
+ *   correct_json = { "<questionId>": true/false }
+ *
+ * - Season bonus: 3 questions for the season
+ *   answer_json = { "q_driverChampion": "VER", "q_teamChampion": "MCL", "q_firstTimeWinner": "ANT" }
+ *   correct_json = same keys/values
+ *
+ * Points:
+ * - Weekend: 5 per correct answer (your latest rule)
+ * - Season: 50 per correct answer
  */
-function extractAnswerMap(answerJson: any): Record<string, any> | null {
-  if (!answerJson) return null;
-  if (typeof answerJson === "object" && !Array.isArray(answerJson)) {
-    if (answerJson.answers && typeof answerJson.answers === "object") {
-      return answerJson.answers as Record<string, any>;
-    }
-    return answerJson as Record<string, any>;
+
+export const WEEKEND_BONUS_POINTS_PER_CORRECT = 5;
+export const SEASON_BONUS_POINTS_PER_CORRECT = 50;
+
+function isPlainObject(v: any) {
+  return v && typeof v === "object" && !Array.isArray(v);
+}
+
+function normStr(v: any): string {
+  return String(v ?? "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "");
+}
+
+function normBool(v: any): boolean | null {
+  if (v === true || v === false) return v;
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    if (s === "true" || s === "yes" || s === "ja") return true;
+    if (s === "false" || s === "no" || s === "nee") return false;
+  }
+  if (typeof v === "number") {
+    if (v === 1) return true;
+    if (v === 0) return false;
   }
   return null;
 }
 
 /**
- * Weekend bonus score:
- * - We itereren over correctAnswers keys (bron van waarheid)
- * - 5 punten per exact match (true/false)
+ * Weekend bonus scoring:
+ * - only scores keys that exist in correct_json
+ * - expects boolean answers
  */
-export function pointsForWeekendBonus(
-  userAnswerJson: any,
-  correctAnswerJson: any
-): number {
-  const userMap = extractAnswerMap(userAnswerJson);
-  const correctMap = extractAnswerMap(correctAnswerJson);
-  if (!userMap || !correctMap) return 0;
-
-  let points = 0;
-  for (const qid of Object.keys(correctMap)) {
-    const u = toBool(userMap[qid]);
-    const c = toBool(correctMap[qid]);
-    if (u !== null && c !== null && u === c) points += WEEKEND_BONUS_POINTS_PER_QUESTION;
+export function scoreWeekendBonus(
+  answerJson: any,
+  correctJson: any,
+  pointsPerCorrect = WEEKEND_BONUS_POINTS_PER_CORRECT
+): { points: number; correctCount: number; totalCount: number } {
+  if (!isPlainObject(answerJson) || !isPlainObject(correctJson)) {
+    return { points: 0, correctCount: 0, totalCount: 0 };
   }
-  return points;
+
+  let correctCount = 0;
+  let totalCount = 0;
+
+  for (const qid of Object.keys(correctJson)) {
+    const c = normBool((correctJson as any)[qid]);
+    if (c === null) continue; // skip invalid admin entry
+    totalCount++;
+
+    const a = normBool((answerJson as any)[qid]);
+    if (a === null) continue; // user didn't answer (or invalid)
+    if (a === c) correctCount++;
+  }
+
+  return {
+    points: correctCount * pointsPerCorrect,
+    correctCount,
+    totalCount,
+  };
 }
 
 /**
- * Season champion (driver/team):
- * 50 punten als exact gelijk (case-insensitive)
+ * Season bonus scoring:
+ * - compares string answers (normalized)
+ * - only scores keys that exist in correct_json
  */
-export function pointsForSeasonChampion(
-  userPick: string | null,
-  correctValue: string | null
-): number {
-  const a = normalizeCode(userPick);
-  const b = normalizeCode(correctValue);
-  if (!a || !b) return 0;
-  return a === b ? SEASON_BONUS_CHAMPION_POINTS : 0;
-}
+export function scoreSeasonBonus(
+  answerJson: any,
+  correctJson: any,
+  pointsPerCorrect = SEASON_BONUS_POINTS_PER_CORRECT
+): { points: number; correctCount: number; totalCount: number } {
+  if (!isPlainObject(answerJson) || !isPlainObject(correctJson)) {
+    return { points: 0, correctCount: 0, totalCount: 0 };
+  }
 
-/**
- * Season: "driver wins at least 1 GP"
- * - raceWinners: array driver codes die minimaal 1 race gewonnen hebben
- * - mapping: driver->punten (outsiders hoger)
- */
-export function pointsForSeasonWinPick(
-  userPick: string | null,
-  raceWinners: string[] | null,
-  mapping: Record<string, number> | null
-): number {
-  const pick = normalizeCode(userPick);
-  if (!pick) return 0;
-  if (!raceWinners || !Array.isArray(raceWinners)) return 0;
+  let correctCount = 0;
+  let totalCount = 0;
 
-  const winners = raceWinners.map((x) => normalizeCode(x)).filter(Boolean);
-  if (!winners.includes(pick)) return 0;
+  for (const key of Object.keys(correctJson)) {
+    const c = normStr((correctJson as any)[key]);
+    if (!c) continue;
+    totalCount++;
 
-  const m = mapping ?? DEFAULT_SEASON_WIN_PICK_POINTS_BY_DRIVER;
-  return typeof m[pick] === "number" ? m[pick] : 0;
-}
+    const a = normStr((answerJson as any)[key]);
+    if (!a) continue;
+    if (a === c) correctCount++;
+  }
 
-/**
- * Optioneel convenience: total bonus in één call
- * (handig voor leaderboard route)
- */
-export function totalBonusPoints(args: {
-  weekendUserAnswerJson?: any;
-  weekendCorrectAnswerJson?: any;
-  seasonDriverChampionPick?: string | null;
-  seasonDriverChampionCorrect?: string | null;
-  seasonTeamChampionPick?: string | null;
-  seasonTeamChampionCorrect?: string | null;
-  seasonWinPick?: string | null;
-  seasonRaceWinners?: string[] | null;
-  seasonWinPickMapping?: Record<string, number> | null;
-} = {}): number {
-  let total = 0;
-
-  total += pointsForWeekendBonus(args.weekendUserAnswerJson, args.weekendCorrectAnswerJson);
-
-  total += pointsForSeasonChampion(
-    args.seasonDriverChampionPick ?? null,
-    args.seasonDriverChampionCorrect ?? null
-  );
-
-  total += pointsForSeasonChampion(
-    args.seasonTeamChampionPick ?? null,
-    args.seasonTeamChampionCorrect ?? null
-  );
-
-  total += pointsForSeasonWinPick(
-    args.seasonWinPick ?? null,
-    args.seasonRaceWinners ?? null,
-    args.seasonWinPickMapping ?? null
-  );
-
-  return total;
+  return {
+    points: correctCount * pointsPerCorrect,
+    correctCount,
+    totalCount,
+  };
 }
