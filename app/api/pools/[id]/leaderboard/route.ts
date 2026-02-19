@@ -1,20 +1,22 @@
+// app/api/pools/[id]/leaderboard/route.ts
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { supabaseAdmin } from "../../../../../lib/supabaseAdmin";
 import {
-  normalizeTop10,
   pointsForSession,
-  scoreWeekendBonus,
-  scoreSeasonBonus,
+  normalizeTop10,
+  pointsForWeekendBonusAnswers,
 } from "../../../../../lib/scoring";
+
+export const runtime = "nodejs";
 
 type SessionRow = {
   id: string;
   event_id: string;
   session_key: string;
   name: string;
-  starts_at: string;
-  lock_at: string;
+  starts_at: string | null;
+  lock_at: string | null;
 };
 
 type PredictionRow = {
@@ -24,8 +26,8 @@ type PredictionRow = {
   prediction_json: any;
 };
 
-function jsonError(message: string, status: number) {
-  return NextResponse.json({ error: message }, { status, headers: { "Cache-Control": "no-store" } });
+function jsonError(message: string, status = 400) {
+  return NextResponse.json({ error: message }, { status });
 }
 
 function getBearerToken(req: Request): string | null {
@@ -40,7 +42,7 @@ async function getUserFromToken(accessToken: string) {
   const supa = createClient(url, anon, { auth: { persistSession: false } });
 
   const { data, error } = await supa.auth.getUser(accessToken);
-  if (error || !data.user) return null;
+  if (error || !data?.user) return null;
   return data.user;
 }
 
@@ -58,22 +60,6 @@ function getPredTop10(predictionJson: any, sessionId: string): string[] | null {
   return normalizeTop10(top10);
 }
 
-/**
- * BONUS TABLE ASSUMPTIONS (defensive):
- *
- * Weekend:
- * - bonus_weekend_sets: { id, pool_id, event_id, lock_at }
- * - bonus_weekend_set_questions: { set_id, question_id }   (not strictly needed for scoring)
- * - bonus_weekend_answers: { set_id, user_id, answer_json }  (user answers)
- * - bonus_weekend_results: { set_id, correct_json }          (admin correct answers)
- *
- * Season:
- * - bonus_season_answers: { pool_id, user_id, answer_json }
- * - bonus_season_results: { pool_id, correct_json }
- *
- * If any of these tables don't exist yet, leaderboard still works (bonus = 0).
- */
-
 export async function GET(req: Request, { params }: { params: { id: string } }) {
   try {
     const poolId = params.id;
@@ -87,7 +73,7 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
 
     const admin = supabaseAdmin();
 
-    // ✅ access check: must be pool member
+    // 1) toegang check: user must be in pool
     const { data: membership, error: memErr } = await admin
       .from("pool_members")
       .select("pool_id,user_id")
@@ -98,7 +84,7 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
     if (memErr) return jsonError(memErr.message, 500);
     if (!membership) return jsonError("Not a pool member", 403);
 
-    // ✅ events (global season)
+    // 2) events
     const { data: events, error: eventsErr } = await admin
       .from("events")
       .select("id,name,starts_at,format")
@@ -114,7 +100,7 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
       );
     }
 
-    // ✅ sessions
+    // 3) sessions
     const { data: sessions, error: sessErr } = await admin
       .from("event_sessions")
       .select("id,event_id,session_key,name,starts_at,lock_at")
@@ -123,7 +109,7 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
 
     if (sessErr) return jsonError(sessErr.message, 500);
 
-    // ✅ pool members + display_name (fallback profiles)
+    // 4) pool members + display_name fallback profiles
     const { data: members, error: membersErr } = await admin
       .from("pool_members")
       .select("user_id,display_name")
@@ -141,17 +127,15 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
     if (profErr) return jsonError(profErr.message, 500);
 
     const profileNameById: Record<string, string | null> = {};
-    for (const p of profiles ?? []) {
-      profileNameById[(p as any).id] = (p as any).display_name ?? null;
-    }
+    for (const p of profiles ?? []) profileNameById[p.id] = (p as any).display_name ?? null;
 
     const memberNameById: Record<string, string | null> = {};
     for (const m of (members ?? []) as any[]) {
-      const direct = String(m.display_name ?? "").trim();
+      const direct = ((m.display_name ?? "") as string).trim();
       memberNameById[m.user_id] = direct ? direct : (profileNameById[m.user_id] ?? null);
     }
 
-    // ✅ predictions
+    // 5) predictions
     const { data: predictions, error: predErr } = await admin
       .from("predictions")
       .select("user_id,pool_id,event_id,prediction_json")
@@ -161,7 +145,7 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
 
     if (predErr) return jsonError(predErr.message, 500);
 
-    // ✅ results per event
+    // 6) results
     const { data: resultsRows, error: resErr } = await admin
       .from("event_results")
       .select("event_id,result_json,results,updated_at")
@@ -170,11 +154,9 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
     if (resErr) return jsonError(resErr.message, 500);
 
     const resultsByEvent: Record<string, any> = {};
-    for (const r of resultsRows ?? []) {
-      resultsByEvent[(r as any).event_id] = pickResultsJson(r);
-    }
+    for (const r of resultsRows ?? []) resultsByEvent[(r as any).event_id] = pickResultsJson(r);
 
-    // prediction lookup by (user,event)
+    // prediction lookup
     const predByUserEvent = new Map<string, PredictionRow>();
     for (const p of (predictions ?? []) as any[]) {
       predByUserEvent.set(`${p.user_id}__${p.event_id}`, p as PredictionRow);
@@ -184,100 +166,118 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
     const sessionsByEvent: Record<string, SessionRow[]> = {};
     for (const s of (sessions ?? []) as any[]) {
       const evId = (s as any).event_id;
-      (sessionsByEvent[evId] ||= []).push(s as SessionRow);
+      if (!sessionsByEvent[evId]) sessionsByEvent[evId] = [];
+      sessionsByEvent[evId].push(s as SessionRow);
     }
 
-    /* ------------------------------------------------------------
-     * BONUS FETCH (DEFENSIVE)
-     * ------------------------------------------------------------ */
-    // Weekend sets for this pool+events
-    const weekendSetByEventId: Record<string, string> = {};
-    let weekendCorrectBySetId: Record<string, any> = {};
-    let weekendAnswerBySetUser: Record<string, any> = {};
+    /** -----------------------------
+     * WEEKEND BONUS SETS (3 vragen)
+     * pool_event_bonus_sets: (id, pool_id, event_id)
+     * pool_event_bonus_set_questions: (set_id, question_id, position)
+     * weekend_official_answers: (event_id, question_id, answer_json)
+     * bonus_weekend_answers: (pool_id, event_id, user_id, question_id, answer_json)
+     * ----------------------------- */
 
-    try {
-      const { data: sets } = await admin
-        .from("bonus_weekend_sets")
-        .select("id,event_id,pool_id")
-        .eq("pool_id", poolId)
-        .in("event_id", eventIds);
+    // A) set_id per event
+    const { data: setRows, error: setErr } = await admin
+      .from("pool_event_bonus_sets")
+      .select("id,event_id,pool_id")
+      .eq("pool_id", poolId)
+      .in("event_id", eventIds);
 
-      for (const s of (sets ?? []) as any[]) {
-        weekendSetByEventId[s.event_id] = s.id;
+    if (setErr) return jsonError(setErr.message, 500);
+
+    const setIdByEvent: Record<string, string> = {};
+    const allSetIds: string[] = [];
+    for (const r of (setRows ?? []) as any[]) {
+      if (r?.event_id && r?.id) {
+        setIdByEvent[r.event_id] = r.id;
+        allSetIds.push(r.id);
       }
-
-      const setIds = Object.values(weekendSetByEventId).filter(Boolean);
-
-      if (setIds.length > 0) {
-        const { data: wr } = await admin
-          .from("bonus_weekend_results")
-          .select("set_id,correct_json")
-          .in("set_id", setIds);
-
-        weekendCorrectBySetId = {};
-        for (const r of (wr ?? []) as any[]) {
-          weekendCorrectBySetId[r.set_id] = r.correct_json ?? null;
-        }
-
-        const { data: wa } = await admin
-          .from("bonus_weekend_answers")
-          .select("set_id,user_id,answer_json")
-          .in("set_id", setIds)
-          .in("user_id", memberIds);
-
-        weekendAnswerBySetUser = {};
-        for (const a of (wa ?? []) as any[]) {
-          weekendAnswerBySetUser[`${a.set_id}__${a.user_id}`] = a.answer_json ?? null;
-        }
-      }
-    } catch {
-      // ignore: bonus tables may not exist yet
     }
 
-    // Season bonus (pool-wide)
-    let seasonCorrectJson: any = null;
-    let seasonAnswerByUserId: Record<string, any> = {};
+    // B) question_ids per set (ordered)
+    let questionIdsByEvent: Record<string, string[]> = {};
+    let allQuestionIds: string[] = [];
 
-    try {
-      const { data: sr } = await admin
-        .from("bonus_season_results")
-        .select("pool_id,correct_json")
-        .eq("pool_id", poolId)
-        .maybeSingle();
+    if (allSetIds.length > 0) {
+      const { data: setQRows, error: setQErr } = await admin
+        .from("pool_event_bonus_set_questions")
+        .select("set_id,question_id,position")
+        .in("set_id", allSetIds)
+        .order("position", { ascending: true });
 
-      seasonCorrectJson = (sr as any)?.correct_json ?? null;
+      if (setQErr) return jsonError(setQErr.message, 500);
 
-      const { data: sa } = await admin
-        .from("bonus_season_answers")
-        .select("pool_id,user_id,answer_json")
-        .eq("pool_id", poolId)
-        .in("user_id", memberIds);
-
-      seasonAnswerByUserId = {};
-      for (const a of (sa ?? []) as any[]) {
-        seasonAnswerByUserId[a.user_id] = a.answer_json ?? null;
+      const qidsBySet: Record<string, string[]> = {};
+      for (const r of (setQRows ?? []) as any[]) {
+        if (!r?.set_id || !r?.question_id) continue;
+        if (!qidsBySet[r.set_id]) qidsBySet[r.set_id] = [];
+        qidsBySet[r.set_id].push(r.question_id);
       }
-    } catch {
-      // ignore: season bonus tables may not exist yet
+
+      questionIdsByEvent = {};
+      for (const evId of Object.keys(setIdByEvent)) {
+        const sid = setIdByEvent[evId];
+        const qids = qidsBySet[sid] ?? [];
+        questionIdsByEvent[evId] = qids.slice(0, 3); // safety: max 3
+      }
+
+      allQuestionIds = Array.from(
+        new Set(Object.values(questionIdsByEvent).flat().filter(Boolean))
+      );
     }
 
-    /* ------------------------------------------------------------
-     * BUILD LEADERBOARD
-     * ------------------------------------------------------------ */
+    // C) official answers (alleen die qids)
+    const officialByEvent: Record<string, Record<string, any>> = {};
+    if (allQuestionIds.length > 0) {
+      const { data: offRows, error: offErr } = await admin
+        .from("weekend_official_answers")
+        .select("event_id,question_id,answer_json")
+        .in("event_id", eventIds)
+        .in("question_id", allQuestionIds);
+
+      if (offErr) return jsonError(offErr.message, 500);
+
+      for (const r of (offRows ?? []) as any[]) {
+        if (!r?.event_id || !r?.question_id) continue;
+        if (!officialByEvent[r.event_id]) officialByEvent[r.event_id] = {};
+        officialByEvent[r.event_id][r.question_id] = r.answer_json;
+      }
+    }
+
+    // D) user answers (alleen die qids)
+    const userAnswersByUserEvent: Record<string, Record<string, any>> = {};
+    if (allQuestionIds.length > 0) {
+      const { data: uaRows, error: uaErr } = await admin
+        .from("bonus_weekend_answers")
+        .select("pool_id,event_id,user_id,question_id,answer_json")
+        .eq("pool_id", poolId)
+        .in("event_id", eventIds)
+        .in("user_id", memberIds)
+        .in("question_id", allQuestionIds);
+
+      if (uaErr) return jsonError(uaErr.message, 500);
+
+      for (const r of (uaRows ?? []) as any[]) {
+        if (!r?.user_id || !r?.event_id || !r?.question_id) continue;
+        const key = `${r.user_id}__${r.event_id}`;
+        if (!userAnswersByUserEvent[key]) userAnswersByUserEvent[key] = {};
+        userAnswersByUserEvent[key][r.question_id] = r.answer_json;
+      }
+    }
+
+    // leaderboard rows
     const rows = memberIds.map((uid: string) => ({
       user_id: uid,
       display_name: memberNameById[uid] ?? null,
       total_points: 0,
-
-      // optional breakdown (handy for debugging later)
-      top10_points: 0,
-      weekend_bonus_points: 0,
-      season_bonus_points: 0,
     }));
 
+    // scoring: sessions + weekend bonus
     for (const row of rows) {
-      // TOP10 points across events/sessions
       for (const evId of eventIds) {
+        // sessions
         const evSessions = sessionsByEvent[evId] ?? [];
         const resultsJson = resultsByEvent[evId];
         const pred = predByUserEvent.get(`${row.user_id}__${evId}`);
@@ -285,36 +285,24 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
 
         for (const s of evSessions) {
           const resultTop10 = getResultTop10(resultsJson, s.id);
-          if (!resultTop10) continue; // no result yet
+          if (!resultTop10) continue;
 
           const predTop10 = getPredTop10(predJson, s.id);
-          const pts = pointsForSession(s.session_key, predTop10, resultTop10);
-
-          row.top10_points += pts;
-          row.total_points += pts;
+          row.total_points += pointsForSession(s.session_key, predTop10, resultTop10);
         }
 
-        // WEEKEND BONUS for this event (if set exists + admin answered)
-        const setId = weekendSetByEventId[evId];
-        if (setId) {
-          const correctJson = weekendCorrectBySetId[setId];
-          const answerJson = weekendAnswerBySetUser[`${setId}__${row.user_id}`];
+        // weekend bonus (alleen de 3 van deze pool+event)
+        const qids = questionIdsByEvent[evId] ?? [];
+        if (qids.length > 0) {
+          const offAll = officialByEvent[evId] ?? {};
+          const offScoped: Record<string, any> = {};
+          for (const qid of qids) offScoped[qid] = offAll[qid];
 
-          if (correctJson && answerJson) {
-            const sc = scoreWeekendBonus(answerJson, correctJson);
-            row.weekend_bonus_points += sc.points;
-            row.total_points += sc.points;
-          }
-        }
-      }
+          const uaAll = userAnswersByUserEvent[`${row.user_id}__${evId}`] ?? {};
+          const uaScoped: Record<string, any> = {};
+          for (const qid of qids) uaScoped[qid] = uaAll[qid];
 
-      // SEASON BONUS (pool-wide)
-      if (seasonCorrectJson) {
-        const mySeasonAns = seasonAnswerByUserId[row.user_id];
-        if (mySeasonAns) {
-          const sc = scoreSeasonBonus(mySeasonAns, seasonCorrectJson);
-          row.season_bonus_points += sc.points;
-          row.total_points += sc.points;
+          row.total_points += pointsForWeekendBonusAnswers(uaScoped, offScoped);
         }
       }
     }
@@ -322,11 +310,7 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
     rows.sort((a, b) => b.total_points - a.total_points);
 
     return NextResponse.json(
-      {
-        ok: true,
-        poolId,
-        leaderboard: rows,
-      },
+      { ok: true, poolId, leaderboard: rows },
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (e: any) {
