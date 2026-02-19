@@ -6,6 +6,7 @@ import {
   pointsForSession,
   normalizeTop10,
   pointsForWeekendBonusAnswers,
+  mapAnswersByQuestionId,
 } from "../../../../../lib/scoring";
 
 export const runtime = "nodejs";
@@ -47,6 +48,7 @@ async function getUserFromToken(accessToken: string) {
 }
 
 function pickResultsJson(row: any): any {
+  // event_results kan result_json of results (legacy) zijn
   return row?.result_json ?? row?.results ?? null;
 }
 
@@ -66,6 +68,7 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
 
     const accessToken =
       getBearerToken(req) || new URL(req.url).searchParams.get("accessToken");
+
     if (!accessToken) return jsonError("Missing accessToken", 401);
 
     const user = await getUserFromToken(accessToken);
@@ -73,7 +76,7 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
 
     const admin = supabaseAdmin();
 
-    // 1) toegang check: user must be in pool
+    // 1) toegang check
     const { data: membership, error: memErr } = await admin
       .from("pool_members")
       .select("pool_id,user_id")
@@ -109,7 +112,7 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
 
     if (sessErr) return jsonError(sessErr.message, 500);
 
-    // 4) pool members + display_name fallback profiles
+    // 4) pool members
     const { data: members, error: membersErr } = await admin
       .from("pool_members")
       .select("user_id,display_name")
@@ -119,6 +122,7 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
 
     const memberIds = (members ?? []).map((m: any) => m.user_id).filter(Boolean);
 
+    // profiles fallback
     const { data: profiles, error: profErr } = await admin
       .from("profiles")
       .select("id,display_name")
@@ -127,7 +131,9 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
     if (profErr) return jsonError(profErr.message, 500);
 
     const profileNameById: Record<string, string | null> = {};
-    for (const p of profiles ?? []) profileNameById[p.id] = (p as any).display_name ?? null;
+    for (const p of profiles ?? []) {
+      profileNameById[(p as any).id] = (p as any).display_name ?? null;
+    }
 
     const memberNameById: Record<string, string | null> = {};
     for (const m of (members ?? []) as any[]) {
@@ -154,9 +160,106 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
     if (resErr) return jsonError(resErr.message, 500);
 
     const resultsByEvent: Record<string, any> = {};
-    for (const r of resultsRows ?? []) resultsByEvent[(r as any).event_id] = pickResultsJson(r);
+    for (const r of resultsRows ?? []) {
+      resultsByEvent[(r as any).event_id] = pickResultsJson(r);
+    }
 
-    // prediction lookup
+    // --- BONUS: bepaal per (pool,event) de 3 geselecteerde question_ids ---
+    const { data: bonusSets, error: setErr } = await admin
+      .from("pool_event_bonus_sets")
+      .select("id,event_id")
+      .eq("pool_id", poolId)
+      .in("event_id", eventIds);
+
+    if (setErr) return jsonError(setErr.message, 500);
+
+    const setIds = (bonusSets ?? []).map((s: any) => s.id).filter(Boolean);
+
+    const setIdByEventId: Record<string, string> = {};
+    for (const s of bonusSets ?? []) {
+      setIdByEventId[(s as any).event_id] = (s as any).id;
+    }
+
+    let selectedQidsByEvent: Record<string, string[]> = {};
+    if (setIds.length > 0) {
+      const { data: setQs, error: setQsErr } = await admin
+        .from("pool_event_bonus_set_questions")
+        .select("set_id,question_id,position")
+        .in("set_id", setIds)
+        .order("position", { ascending: true });
+
+      if (setQsErr) return jsonError(setQsErr.message, 500);
+
+      // set_id -> [question_id...]
+      const qidsBySet: Record<string, string[]> = {};
+      for (const r of setQs ?? []) {
+        const sid = (r as any).set_id;
+        const qid = (r as any).question_id;
+        if (!sid || !qid) continue;
+        if (!qidsBySet[sid]) qidsBySet[sid] = [];
+        qidsBySet[sid].push(qid);
+      }
+
+      // event_id -> [question_id...]
+      for (const evId of Object.keys(setIdByEventId)) {
+        const sid = setIdByEventId[evId];
+        selectedQidsByEvent[evId] = (qidsBySet[sid] ?? []).slice(0, 3);
+      }
+    }
+
+    // flatten alle geselecteerde qids (voor batch fetch)
+    const allSelectedQids = Array.from(
+      new Set(Object.values(selectedQidsByEvent).flat().filter(Boolean))
+    );
+
+    // 7) official weekend answers (alleen selected qids)
+    const officialByEvent: Record<string, Record<string, any>> = {};
+    if (allSelectedQids.length > 0) {
+      const { data: officialRows, error: offErr } = await admin
+        .from("weekend_official_answers")
+        .select("event_id,question_id,answer_json")
+        .in("event_id", eventIds)
+        .in("question_id", allSelectedQids);
+
+      if (offErr) return jsonError(offErr.message, 500);
+
+      for (const evId of eventIds) officialByEvent[evId] = {};
+
+      for (const r of officialRows ?? []) {
+        const evId = (r as any).event_id;
+        const qid = (r as any).question_id;
+        if (!evId || !qid) continue;
+        if (!officialByEvent[evId]) officialByEvent[evId] = {};
+        officialByEvent[evId][qid] = (r as any).answer_json;
+      }
+    }
+
+    // 8) user weekend answers (alleen selected qids)
+    const userAnswersByUserEvent: Record<string, Record<string, any>> = {};
+    if (allSelectedQids.length > 0) {
+      const { data: userBonusRows, error: ubErr } = await admin
+        .from("bonus_weekend_answers")
+        .select("user_id,event_id,question_id,answer_json")
+        .eq("pool_id", poolId)
+        .in("event_id", eventIds)
+        .in("user_id", memberIds)
+        .in("question_id", allSelectedQids);
+
+      if (ubErr) return jsonError(ubErr.message, 500);
+
+      for (const r of userBonusRows ?? []) {
+        const uid = (r as any).user_id;
+        const evId = (r as any).event_id;
+        const qid = (r as any).question_id;
+        if (!uid || !evId || !qid) continue;
+
+        const key = `${uid}__${evId}`;
+        if (!userAnswersByUserEvent[key]) userAnswersByUserEvent[key] = {};
+        userAnswersByUserEvent[key][qid] = (r as any).answer_json;
+      }
+    }
+
+    // quick lookup prediction by (user,event)
     const predByUserEvent = new Map<string, PredictionRow>();
     for (const p of (predictions ?? []) as any[]) {
       predByUserEvent.set(`${p.user_id}__${p.event_id}`, p as PredictionRow);
@@ -170,111 +273,14 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
       sessionsByEvent[evId].push(s as SessionRow);
     }
 
-    /** -----------------------------
-     * WEEKEND BONUS SETS (3 vragen)
-     * pool_event_bonus_sets: (id, pool_id, event_id)
-     * pool_event_bonus_set_questions: (set_id, question_id, position)
-     * weekend_official_answers: (event_id, question_id, answer_json)
-     * bonus_weekend_answers: (pool_id, event_id, user_id, question_id, answer_json)
-     * ----------------------------- */
-
-    // A) set_id per event
-    const { data: setRows, error: setErr } = await admin
-      .from("pool_event_bonus_sets")
-      .select("id,event_id,pool_id")
-      .eq("pool_id", poolId)
-      .in("event_id", eventIds);
-
-    if (setErr) return jsonError(setErr.message, 500);
-
-    const setIdByEvent: Record<string, string> = {};
-    const allSetIds: string[] = [];
-    for (const r of (setRows ?? []) as any[]) {
-      if (r?.event_id && r?.id) {
-        setIdByEvent[r.event_id] = r.id;
-        allSetIds.push(r.id);
-      }
-    }
-
-    // B) question_ids per set (ordered)
-    let questionIdsByEvent: Record<string, string[]> = {};
-    let allQuestionIds: string[] = [];
-
-    if (allSetIds.length > 0) {
-      const { data: setQRows, error: setQErr } = await admin
-        .from("pool_event_bonus_set_questions")
-        .select("set_id,question_id,position")
-        .in("set_id", allSetIds)
-        .order("position", { ascending: true });
-
-      if (setQErr) return jsonError(setQErr.message, 500);
-
-      const qidsBySet: Record<string, string[]> = {};
-      for (const r of (setQRows ?? []) as any[]) {
-        if (!r?.set_id || !r?.question_id) continue;
-        if (!qidsBySet[r.set_id]) qidsBySet[r.set_id] = [];
-        qidsBySet[r.set_id].push(r.question_id);
-      }
-
-      questionIdsByEvent = {};
-      for (const evId of Object.keys(setIdByEvent)) {
-        const sid = setIdByEvent[evId];
-        const qids = qidsBySet[sid] ?? [];
-        questionIdsByEvent[evId] = qids.slice(0, 3); // safety: max 3
-      }
-
-      allQuestionIds = Array.from(
-        new Set(Object.values(questionIdsByEvent).flat().filter(Boolean))
-      );
-    }
-
-    // C) official answers (alleen die qids)
-    const officialByEvent: Record<string, Record<string, any>> = {};
-    if (allQuestionIds.length > 0) {
-      const { data: offRows, error: offErr } = await admin
-        .from("weekend_official_answers")
-        .select("event_id,question_id,answer_json")
-        .in("event_id", eventIds)
-        .in("question_id", allQuestionIds);
-
-      if (offErr) return jsonError(offErr.message, 500);
-
-      for (const r of (offRows ?? []) as any[]) {
-        if (!r?.event_id || !r?.question_id) continue;
-        if (!officialByEvent[r.event_id]) officialByEvent[r.event_id] = {};
-        officialByEvent[r.event_id][r.question_id] = r.answer_json;
-      }
-    }
-
-    // D) user answers (alleen die qids)
-    const userAnswersByUserEvent: Record<string, Record<string, any>> = {};
-    if (allQuestionIds.length > 0) {
-      const { data: uaRows, error: uaErr } = await admin
-        .from("bonus_weekend_answers")
-        .select("pool_id,event_id,user_id,question_id,answer_json")
-        .eq("pool_id", poolId)
-        .in("event_id", eventIds)
-        .in("user_id", memberIds)
-        .in("question_id", allQuestionIds);
-
-      if (uaErr) return jsonError(uaErr.message, 500);
-
-      for (const r of (uaRows ?? []) as any[]) {
-        if (!r?.user_id || !r?.event_id || !r?.question_id) continue;
-        const key = `${r.user_id}__${r.event_id}`;
-        if (!userAnswersByUserEvent[key]) userAnswersByUserEvent[key] = {};
-        userAnswersByUserEvent[key][r.question_id] = r.answer_json;
-      }
-    }
-
-    // leaderboard rows
+    // 9) leaderboard rows
     const rows = memberIds.map((uid: string) => ({
       user_id: uid,
       display_name: memberNameById[uid] ?? null,
       total_points: 0,
     }));
 
-    // scoring: sessions + weekend bonus
+    // 10) score optellen
     for (const row of rows) {
       for (const evId of eventIds) {
         // sessions
@@ -291,18 +297,21 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
           row.total_points += pointsForSession(s.session_key, predTop10, resultTop10);
         }
 
-        // weekend bonus (alleen de 3 van deze pool+event)
-        const qids = questionIdsByEvent[evId] ?? [];
-        if (qids.length > 0) {
-          const offAll = officialByEvent[evId] ?? {};
-          const offScoped: Record<string, any> = {};
-          for (const qid of qids) offScoped[qid] = offAll[qid];
+        // weekend bonus (alleen 3 selected questions)
+        const selectedQids = selectedQidsByEvent[evId] ?? [];
+        if (selectedQids.length > 0) {
+          const correctMap = officialByEvent[evId] ?? {};
+          const userMap = userAnswersByUserEvent[`${row.user_id}__${evId}`] ?? {};
 
-          const uaAll = userAnswersByUserEvent[`${row.user_id}__${evId}`] ?? {};
-          const uaScoped: Record<string, any> = {};
-          for (const qid of qids) uaScoped[qid] = uaAll[qid];
+          // filter exact naar selectedQids (zekerheid)
+          const correctFiltered: Record<string, any> = {};
+          const userFiltered: Record<string, any> = {};
+          for (const qid of selectedQids) {
+            if (qid in correctMap) correctFiltered[qid] = correctMap[qid];
+            if (qid in userMap) userFiltered[qid] = userMap[qid];
+          }
 
-          row.total_points += pointsForWeekendBonusAnswers(uaScoped, offScoped);
+          row.total_points += pointsForWeekendBonusAnswers(userFiltered, correctFiltered);
         }
       }
     }
