@@ -1,163 +1,211 @@
-// lib/scoring.ts
+// =====================================================
+// TOP 10 POSITION SCORING
+// =====================================================
 
-// ------------------------------
-// Helpers: normalize / compare
-// ------------------------------
-export function normalizeTop10(input: any): string[] | null {
-  if (!Array.isArray(input) || input.length !== 10) return null;
+export function countCorrectPositions(
+  predicted: string[] | null,
+  result: string[] | null
+): number {
+  if (!predicted || !result) return 0;
 
-  const arr = input.map((x) =>
-    typeof x === "string" ? x.trim().toUpperCase().replace(/\s+/g, "") : ""
-  );
-
-  // Als alles leeg is: behandelen als "geen top10"
-  if (arr.every((x) => x === "")) return null;
-
-  return arr;
-}
-
-export function pointsPerCorrectPosition(sessionKey: string): number {
-  const k = (sessionKey ?? "").toLowerCase();
-
-  // FP
-  if (k === "fp1" || k === "fp2" || k === "fp3") return 1;
-
-  // Sprint Quali
-  if (k === "sprint_quali" || k === "sprintquali" || k === "sq") return 3;
-
-  // Quali
-  if (k === "qual1" || k === "q") return 3;
-
-  // Sprint Race
-  if (k === "sprint_race" || k === "sprintrace" || k === "sr") return 4;
-
-  // Race
-  if (k === "race" || k === "r") return 5;
-
-  return 0;
-}
-
-function countCorrectPositions(pred: string[], res: string[]): number {
   let correct = 0;
+
   for (let i = 0; i < 10; i++) {
-    if ((pred[i] ?? "") !== "" && pred[i] === res[i]) correct++;
+    if (predicted[i] && result[i] && predicted[i] === result[i]) {
+      correct++;
+    }
   }
+
   return correct;
 }
 
-/**
- * Score = (#correcte posities) * (punten per correcte positie)
- *
- * - FP: max 10
- * - Sprint/quali: max 30
- * - Sprint race: max 40
- * - Race: max 50
- */
-export function pointsForSession(
-  sessionKey: string,
-  predTop10: string[] | null,
-  resultTop10: string[] | null
+export function pointsForTop10(
+  predicted: string[] | null,
+  result: string[] | null
 ): number {
-  const ppc = pointsPerCorrectPosition(sessionKey);
-  if (ppc <= 0) return 0;
-  if (!predTop10 || !resultTop10) return 0;
-
-  const correct = countCorrectPositions(predTop10, resultTop10);
-  return correct * ppc;
+  const correct = countCorrectPositions(predicted, result);
+  return correct * 5; // 5 punten per juiste positie
 }
 
-// ------------------------------
-// Weekend bonusvragen (5 punten per correct)
-// Verwacht booleans (true/false) of null/undefined.
-// ------------------------------
-function toBool(v: any): boolean | null {
-  if (typeof v === "boolean") return v;
-  if (v && typeof v === "object" && typeof v.value === "boolean") return v.value;
+// =====================================================
+// HELPER: NORMALIZE ANSWERS
+// Ondersteunt:
+// - { value: true }
+// - true
+// - rows van Supabase
+// =====================================================
+
+type AnswerJson = { value?: any } | boolean | null;
+
+function extractBoolean(raw: AnswerJson): boolean | null {
+  if (raw === null || raw === undefined) return null;
+
+  if (typeof raw === "boolean") return raw;
+
+  if (typeof raw === "object" && "value" in raw) {
+    const v = (raw as any).value;
+    return typeof v === "boolean" ? v : null;
+  }
+
   return null;
 }
 
+export function normalizeAnswerRows(
+  rows: Array<{ question_id: string; answer_json: AnswerJson }> | null
+): Record<string, boolean> {
+  const map: Record<string, boolean> = {};
+  if (!rows) return map;
+
+  for (const row of rows) {
+    const value = extractBoolean(row.answer_json);
+    if (typeof value === "boolean") {
+      map[row.question_id] = value;
+    }
+  }
+
+  return map;
+}
+
+export function normalizeAnswerMap(
+  obj: Record<string, any> | null
+): Record<string, boolean> {
+  const map: Record<string, boolean> = {};
+  if (!obj) return map;
+
+  for (const [qid, raw] of Object.entries(obj)) {
+    const value = extractBoolean(raw);
+    if (typeof value === "boolean") {
+      map[qid] = value;
+    }
+  }
+
+  return map;
+}
+
+// =====================================================
+// WEEKEND BONUS SCORING (5 punten per correct)
+// =====================================================
+
 export function pointsForWeekendBonus(
-  userAnswers: Record<string, any> | null,
-  correctAnswers: Record<string, any> | null
+  userAnswersInput:
+    | Record<string, any>
+    | Array<{ question_id: string; answer_json: any }>
+    | null,
+  correctAnswersInput:
+    | Record<string, any>
+    | Array<{ question_id: string; answer_json: any }>
+    | null
 ): number {
+  const userAnswers = Array.isArray(userAnswersInput)
+    ? normalizeAnswerRows(userAnswersInput)
+    : normalizeAnswerMap(userAnswersInput);
+
+  const correctAnswers = Array.isArray(correctAnswersInput)
+    ? normalizeAnswerRows(correctAnswersInput)
+    : normalizeAnswerMap(correctAnswersInput);
+
   if (!userAnswers || !correctAnswers) return 0;
 
   let points = 0;
 
   for (const qid of Object.keys(correctAnswers)) {
-    const u = toBool(userAnswers[qid]);
-    const c = toBool(correctAnswers[qid]);
-
-    // Alleen scoren als beiden echt boolean zijn
-    if (u !== null && c !== null && u === c) points += 5;
+    if (
+      typeof userAnswers[qid] === "boolean" &&
+      typeof correctAnswers[qid] === "boolean" &&
+      userAnswers[qid] === correctAnswers[qid]
+    ) {
+      points += 5;
+    }
   }
 
   return points;
 }
 
-// ------------------------------
-// Season champion vragen (50 punten)
-// Handig voor:
-// - driver champion
-// - team champion
-// ------------------------------
-export function pointsForSeasonChampion(
-  userPick: string | null,
-  correctValue: string | null
-): number {
-  if (!userPick || !correctValue) return 0;
+// =====================================================
+// SEASON BONUS SCORING (50 punten per correct)
+// =====================================================
 
-  return userPick.trim().toUpperCase() === correctValue.trim().toUpperCase() ? 50 : 0;
+export function pointsForSeasonBonus(
+  userAnswersInput:
+    | Record<string, any>
+    | Array<{ question_id: string; answer_json: any }>
+    | null,
+  correctAnswersInput:
+    | Record<string, any>
+    | Array<{ question_id: string; answer_json: any }>
+    | null
+): number {
+  const userAnswers = Array.isArray(userAnswersInput)
+    ? normalizeAnswerRows(userAnswersInput)
+    : normalizeAnswerMap(userAnswersInput);
+
+  const correctAnswers = Array.isArray(correctAnswersInput)
+    ? normalizeAnswerRows(correctAnswersInput)
+    : normalizeAnswerMap(correctAnswersInput);
+
+  if (!userAnswers || !correctAnswers) return 0;
+
+  let points = 0;
+
+  for (const qid of Object.keys(correctAnswers)) {
+    if (
+      typeof userAnswers[qid] === "boolean" &&
+      typeof correctAnswers[qid] === "boolean" &&
+      userAnswers[qid] === correctAnswers[qid]
+    ) {
+      points += 50;
+    }
+  }
+
+  return points;
 }
 
-// ------------------------------
-// Season: "Welke coureur wint minstens 1 GP?"
-// Variabele punten op basis van risico.
-//
-// raceWinners = lijst met coureurs die minimaal 1 race hebben gewonnen (strings)
-// winPickPoints = mapping { "VERSTAPPEN": 5, "NORRIS": 12, ... }
-//
-// Als coureur heeft gewonnen -> return winPickPoints[pick] (of 0 als niet in mapping)
-// ------------------------------
-export function pointsForSeasonWinPick(
-  userPick: string | null,
-  raceWinners: string[] | null,
-  winPickPoints: Record<string, number> | null
-): number {
-  if (!userPick || !raceWinners || !winPickPoints) return 0;
+// =====================================================
+// TOTAL EVENT SCORE
+// =====================================================
 
-  const pick = userPick.trim().toUpperCase();
+export function calculateTotalEventPoints({
+  predictedTop10,
+  resultTop10,
+  weekendUserAnswers,
+  weekendOfficialAnswers,
+}: {
+  predictedTop10: string[] | null;
+  resultTop10: string[] | null;
+  weekendUserAnswers:
+    | Record<string, any>
+    | Array<{ question_id: string; answer_json: any }>
+    | null;
+  weekendOfficialAnswers:
+    | Record<string, any>
+    | Array<{ question_id: string; answer_json: any }>
+    | null;
+}) {
+  const top10Points = pointsForTop10(predictedTop10, resultTop10);
+  const weekendBonusPoints = pointsForWeekendBonus(
+    weekendUserAnswers,
+    weekendOfficialAnswers
+  );
 
-  const winnersUpper = raceWinners.map((x) => (x ?? "").trim().toUpperCase());
-  const hasWon = winnersUpper.includes(pick);
-
-  if (!hasWon) return 0;
-
-  return winPickPoints[pick] ?? 0;
+  return top10Points + weekendBonusPoints;
 }
 
-// ------------------------------
-// (OPTIONEEL) Default mapping voor winPickPoints
-// Je kunt dit vervangen door data uit Supabase.
-// Keys MOETEN uppercase zijn om match te krijgen.
-// ------------------------------
-export const DEFAULT_WIN_PICK_POINTS: Record<string, number> = {
-  // Topfavorieten (laag)
-  VERSTAPPEN: 5,
-  HAMILTON: 8,
-  LECLERC: 10,
-  NORRIS: 12,
-  RUSSELL: 14,
-  PIASTRI: 16,
+// =====================================================
+// TOTAL SEASON SCORE (optioneel)
+// =====================================================
 
-  // Midden (meer)
-  SAINZ: 20,
-  ALONSO: 22,
-  GASLY: 28,
-  OCON: 30,
-
-  // Underdogs (hoog)
-  TSUNODA: 35,
-  ALBON: 40,
-  HULKENBERG: 50,
-};
+export function calculateTotalSeasonBonusPoints({
+  seasonUserAnswers,
+  seasonOfficialAnswers,
+}: {
+  seasonUserAnswers:
+    | Record<string, any>
+    | Array<{ question_id: string; answer_json: any }>
+    | null;
+  seasonOfficialAnswers:
+    | Record<string, any>
+    | Array<{ question_id: string; answer_json: any }>
+    | null;
+}) {
+  return pointsForSeasonBonus(seasonUserAnswers, seasonOfficialAnswers);
+}
