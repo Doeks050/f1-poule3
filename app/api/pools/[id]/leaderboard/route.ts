@@ -7,7 +7,7 @@ import {
   normalizeTop10,
   pointsForWeekendBonusAnswers,
   mapAnswersByQuestionId,
-} from "../../../../lib/scoring";
+} from "../../../../../lib/scoring";
 
 export const runtime = "nodejs";
 
