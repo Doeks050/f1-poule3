@@ -76,7 +76,7 @@ function extractBoolean(answer_json: any): boolean | undefined {
 
   // Case B: jsonb is { value: boolean|null }
   if (answer_json && typeof answer_json === "object" && "value" in answer_json) {
-    if (typeof answer_json.value === "boolean") return answer_json.value;
+    if (typeof (answer_json as any).value === "boolean") return (answer_json as any).value;
     return undefined; // null/undefined => geen officieel antwoord of geen user antwoord
   }
 
@@ -106,16 +106,17 @@ export function mapAnswersByQuestionId(
 // Verwacht Records met booleans (true/false) of undefined (geen antwoord)
 // ------------------------------
 export function pointsForWeekendBonusAnswers(
-  userAnswers: Record<string, boolean | undefined> | null,
-  correctAnswers: Record<string, boolean | undefined> | null
+  userAnswers: Record<string, any> | null,
+  correctAnswers: Record<string, any> | null
 ): number {
   if (!userAnswers || !correctAnswers) return 0;
 
   let points = 0;
 
+  // Score uitsluitend vragen waarvoor een official correct answer bestaat
   for (const qid of Object.keys(correctAnswers)) {
-    const u = userAnswers[qid];
-    const c = correctAnswers[qid];
+    const u = extractBoolean((userAnswers as any)[qid]);
+    const c = extractBoolean((correctAnswers as any)[qid]);
 
     // Alleen score als beide echt boolean zijn
     if (typeof u === "boolean" && typeof c === "boolean") {
