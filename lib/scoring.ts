@@ -1,8 +1,12 @@
 // lib/scoring.ts
+// Centrale scoring helpers voor:
+// - Top10 per sessie (FP/Quali/Sprint/Race)
+// - Bonusvragen (weekend/season)
 
-// ------------------------------
-// Helpers: normalize / compare
-// ------------------------------
+// -----------------------------
+// Top10 helpers
+// -----------------------------
+
 export function normalizeTop10(input: any): string[] | null {
   if (!Array.isArray(input) || input.length !== 10) return null;
 
@@ -26,7 +30,7 @@ export function pointsPerCorrectPosition(sessionKey: string): number {
   if (k === "sprint_quali" || k === "sprintquali" || k === "sq") return 3;
 
   // Quali
-  if (k === "qual1" || k === "q" || k === "quali" || k === "qualifying") return 3;
+  if (k === "quali" || k === "q") return 3;
 
   // Sprint Race
   if (k === "sprint_race" || k === "sprintrace" || k === "sr") return 4;
@@ -47,6 +51,10 @@ function countCorrectPositions(pred: string[], res: string[]): number {
 
 /**
  * Score = (#correcte posities) * (punten per correcte positie)
+ * - FP: max 10
+ * - Sprint/Quali: max 30
+ * - Sprint race: max 40
+ * - Race: max 50
  */
 export function pointsForSession(
   sessionKey: string,
@@ -61,116 +69,88 @@ export function pointsForSession(
   return correct * ppc;
 }
 
-// ------------------------------
-// Bonus answers mapping helpers
-// (werkt met jsonb die óf true/false is, óf { value: true/false/null })
-// ------------------------------
-export type AnswerRow = {
-  question_id: string;
-  answer_json: any;
-};
+// -----------------------------
+// Bonus helpers
+// -----------------------------
 
-function extractBoolean(answer_json: any): boolean | undefined {
-  // Case A: jsonb is direct boolean
-  if (typeof answer_json === "boolean") return answer_json;
+// ✅ weekend bonus = 5 punten per goed antwoord
+export const WEEKEND_BONUS_POINTS_PER_CORRECT = 5;
 
-  // Case B: jsonb is { value: boolean|null }
-  if (answer_json && typeof answer_json === "object" && "value" in answer_json) {
-    if (typeof (answer_json as any).value === "boolean") return (answer_json as any).value;
-    return undefined; // null/undefined => geen officieel antwoord of geen user antwoord
+// (season bonus = later; jij wil 50 per goed antwoord, maar leaderboard telt nu alleen weekend.)
+export const SEASON_BONUS_POINTS_PER_CORRECT = 50;
+
+export type BoolMap = Record<string, boolean>;
+
+/**
+ * Normaliseert antwoord-json naar: { [questionId]: boolean }
+ * We accepteren:
+ * - boolean true/false
+ * - strings: "yes"/"no", "true"/"false", "ja"/"nee", "1"/"0"
+ */
+export function mapAnswersByQuestionId(input: any): BoolMap {
+  const out: BoolMap = {};
+  if (!input || typeof input !== "object") return out;
+
+  for (const [k, v] of Object.entries(input)) {
+    const key = String(k);
+
+    if (typeof v === "boolean") {
+      out[key] = v;
+      continue;
+    }
+
+    if (typeof v === "number") {
+      out[key] = v !== 0;
+      continue;
+    }
+
+    if (typeof v === "string") {
+      const s = v.trim().toLowerCase();
+      if (s === "true" || s === "yes" || s === "ja" || s === "y" || s === "1") {
+        out[key] = true;
+        continue;
+      }
+      if (s === "false" || s === "no" || s === "nee" || s === "n" || s === "0") {
+        out[key] = false;
+        continue;
+      }
+      // Onbekend -> skip
+      continue;
+    }
+
+    // onbekend type -> skip
   }
 
-  // Case C: soms string "true"/"false"
-  if (typeof answer_json === "string") {
-    const v = answer_json.trim().toLowerCase();
-    if (v === "true") return true;
-    if (v === "false") return false;
-  }
-
-  return undefined;
-}
-
-export function mapAnswersByQuestionId(
-  rows: AnswerRow[] | null | undefined
-): Record<string, boolean | undefined> {
-  const out: Record<string, boolean | undefined> = {};
-  for (const r of rows ?? []) {
-    if (!r?.question_id) continue;
-    out[r.question_id] = extractBoolean(r.answer_json);
-  }
   return out;
 }
 
-// ------------------------------
-// Weekend bonusvragen (5 punten per correct)
-// Verwacht Records met booleans (true/false) of undefined (geen antwoord)
-// ------------------------------
-export function pointsForWeekendBonusAnswers(
-  userAnswers: Record<string, any> | null,
-  correctAnswers: Record<string, any> | null
-): number {
-  if (!userAnswers || !correctAnswers) return 0;
+/**
+ * Weekend bonus score:
+ * - questionIds = de 3 question_id’s die in de set zitten (die voor iedereen gelijk zijn)
+ * - answerJson = gebruiker answers (answer_json)
+ * - correctJson = admin answers (correct_json)
+ */
+export function pointsForWeekendBonusAnswers(args: {
+  questionIds: string[];
+  answerJson: any;
+  correctJson: any;
+}): number {
+  const questionIds = Array.isArray(args.questionIds) ? args.questionIds : [];
+  if (questionIds.length === 0) return 0;
 
-  let points = 0;
+  const got = mapAnswersByQuestionId(args.answerJson);
+  const expected = mapAnswersByQuestionId(args.correctJson);
 
-  // Score uitsluitend vragen waarvoor een official correct answer bestaat
-  for (const qid of Object.keys(correctAnswers)) {
-    const u = extractBoolean((userAnswers as any)[qid]);
-    const c = extractBoolean((correctAnswers as any)[qid]);
+  let correct = 0;
+  for (const qid of questionIds) {
+    // Alleen scoren als admin correct answer gezet heeft
+    if (typeof expected[qid] !== "boolean") continue;
 
-    // Alleen score als beide echt boolean zijn
-    if (typeof u === "boolean" && typeof c === "boolean") {
-      if (u === c) points += 5;
-    }
+    // Alleen scoren als user antwoord gezet heeft
+    if (typeof got[qid] !== "boolean") continue;
+
+    if (got[qid] === expected[qid]) correct++;
   }
 
-  return points;
+  return correct * WEEKEND_BONUS_POINTS_PER_CORRECT;
 }
-
-// Backwards-compatible alias (als je route.ts nog pointsForWeekendBonus gebruikt)
-export const pointsForWeekendBonus = pointsForWeekendBonusAnswers;
-
-// ------------------------------
-// Season champion vragen (50 punten)
-// ------------------------------
-export function pointsForSeasonChampion(
-  userPick: string | null,
-  correctValue: string | null
-): number {
-  if (!userPick || !correctValue) return 0;
-  return userPick.trim().toUpperCase() === correctValue.trim().toUpperCase() ? 50 : 0;
-}
-
-// ------------------------------
-// Season: "Welke coureur wint minstens 1 GP?"
-// ------------------------------
-export function pointsForSeasonWinPick(
-  userPick: string | null,
-  raceWinners: string[] | null,
-  winPickPoints: Record<string, number> | null
-): number {
-  if (!userPick || !raceWinners || !winPickPoints) return 0;
-
-  const pick = userPick.trim().toUpperCase();
-  const winnersUpper = raceWinners.map((x) => (x ?? "").trim().toUpperCase());
-  const hasWon = winnersUpper.includes(pick);
-  if (!hasWon) return 0;
-
-  return winPickPoints[pick] ?? 0;
-}
-
-export const DEFAULT_WIN_PICK_POINTS: Record<string, number> = {
-  VERSTAPPEN: 5,
-  HAMILTON: 8,
-  LECLERC: 10,
-  NORRIS: 12,
-  RUSSELL: 14,
-  PIASTRI: 16,
-  SAINZ: 20,
-  ALONSO: 22,
-  GASLY: 28,
-  OCON: 30,
-  TSUNODA: 35,
-  ALBON: 40,
-  HULKENBERG: 50,
-};
