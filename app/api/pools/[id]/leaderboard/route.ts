@@ -6,7 +6,6 @@ import {
   pointsForSession,
   normalizeTop10,
   pointsForWeekendBonusAnswers,
-  mapAnswersByQuestionId,
 } from "../../../../../lib/scoring";
 
 export const runtime = "nodejs";
@@ -212,50 +211,63 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
       new Set(Object.values(selectedQidsByEvent).flat().filter(Boolean))
     );
 
-    // 7) official weekend answers (alleen selected qids)
-    const officialByEvent: Record<string, Record<string, any>> = {};
-    if (allSelectedQids.length > 0) {
-      const { data: officialRows, error: offErr } = await admin
-        .from("weekend_official_answers")
-        .select("event_id,question_id,answer_json")
-        .in("event_id", eventIds)
-        .in("question_id", allSelectedQids);
-
-      if (offErr) return jsonError(offErr.message, 500);
-
-      for (const evId of eventIds) officialByEvent[evId] = {};
-
-      for (const r of officialRows ?? []) {
-        const evId = (r as any).event_id;
-        const qid = (r as any).question_id;
-        if (!evId || !qid) continue;
-        if (!officialByEvent[evId]) officialByEvent[evId] = {};
-        officialByEvent[evId][qid] = (r as any).answer_json;
-      }
-    }
-
-    // 8) user weekend answers (alleen selected qids)
+    // 7) bonus answers (admin correct + user answers) uit bonus_answers
+    // Admin zet correct antwoord in dezelfde tabel met user_id = 'admin'
+    const correctByEvent: Record<string, Record<string, any>> = {};
     const userAnswersByUserEvent: Record<string, Record<string, any>> = {};
+
     if (allSelectedQids.length > 0) {
-      const { data: userBonusRows, error: ubErr } = await admin
-        .from("bonus_weekend_answers")
-        .select("user_id,event_id,question_id,answer_json")
+      // init
+      for (const evId of eventIds) correctByEvent[evId] = {};
+
+      // 7a) admin correct answers (1 row per pool+event)
+      const { data: adminBonusRows, error: adminBonusErr } = await admin
+        .from("bonus_answers")
+        .select("event_id,answer_json,correct_json")
         .eq("pool_id", poolId)
         .in("event_id", eventIds)
-        .in("user_id", memberIds)
-        .in("question_id", allSelectedQids);
+        .eq("user_id", "admin");
 
-      if (ubErr) return jsonError(ubErr.message, 500);
+      if (adminBonusErr) return jsonError(adminBonusErr.message, 500);
+
+      for (const r of adminBonusRows ?? []) {
+        const evId = (r as any).event_id as string | null;
+        if (!evId) continue;
+
+        const src = (r as any).correct_json ?? (r as any).answer_json;
+        if (!src || typeof src !== "object") continue;
+
+        const selected = selectedQidsByEvent[evId] ?? [];
+        for (const qid of selected) {
+          if (qid in src) correctByEvent[evId][qid] = (src as any)[qid];
+        }
+      }
+
+      // 7b) user answers (1 row per user+pool+event)
+      const { data: userBonusRows, error: userBonusErr } = await admin
+        .from("bonus_answers")
+        .select("user_id,event_id,answer_json")
+        .eq("pool_id", poolId)
+        .in("event_id", eventIds)
+        .in("user_id", memberIds);
+
+      if (userBonusErr) return jsonError(userBonusErr.message, 500);
 
       for (const r of userBonusRows ?? []) {
-        const uid = (r as any).user_id;
-        const evId = (r as any).event_id;
-        const qid = (r as any).question_id;
-        if (!uid || !evId || !qid) continue;
+        const uid = (r as any).user_id as string | null;
+        const evId = (r as any).event_id as string | null;
+        if (!uid || !evId) continue;
+
+        const src = (r as any).answer_json;
+        if (!src || typeof src !== "object") continue;
 
         const key = `${uid}__${evId}`;
         if (!userAnswersByUserEvent[key]) userAnswersByUserEvent[key] = {};
-        userAnswersByUserEvent[key][qid] = (r as any).answer_json;
+
+        const selected = selectedQidsByEvent[evId] ?? [];
+        for (const qid of selected) {
+          if (qid in src) userAnswersByUserEvent[key][qid] = (src as any)[qid];
+        }
       }
     }
 
@@ -300,7 +312,7 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
         // weekend bonus (alleen 3 selected questions)
         const selectedQids = selectedQidsByEvent[evId] ?? [];
         if (selectedQids.length > 0) {
-          const correctMap = officialByEvent[evId] ?? {};
+          const correctMap = correctByEvent[evId] ?? {};
           const userMap = userAnswersByUserEvent[`${row.user_id}__${evId}`] ?? {};
 
           // filter exact naar selectedQids (zekerheid)
