@@ -1,128 +1,108 @@
+// app/api/bonus/weekend-answer/route.ts
 import { NextResponse } from "next/server";
+import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
 import { createClient } from "@supabase/supabase-js";
+
+export const runtime = "nodejs";
 
 function jsonError(message: string, status = 400) {
   return NextResponse.json({ error: message }, { status });
 }
 
-export async function POST(req: Request) {
-  // Auth header
-  const auth = req.headers.get("authorization") || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
-  if (!token) return jsonError("Missing bearer token", 401);
-
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-  if (!supabaseUrl || !anonKey || !serviceKey) return jsonError("Server env missing", 500);
-
-  // 1) user via token
-  const authClient = createClient(supabaseUrl, anonKey, {
-    auth: { persistSession: false },
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  });
-
-  const { data: userData, error: userErr } = await authClient.auth.getUser();
-  if (userErr || !userData?.user) return jsonError("Invalid session", 401);
-  const userId = userData.user.id;
-
-  // 2) payload
-  const body = await req.json().catch(() => null);
-  const poolId = body?.poolId as string | undefined;
-  const eventId = body?.eventId as string | undefined;
-  const questionId = body?.questionId as string | undefined;
-  const value = body?.value as boolean | null | undefined;
-
-  if (!poolId || !eventId || !questionId) return jsonError("Missing poolId/eventId/questionId", 400);
-  if (!(value === true || value === false || value === null)) return jsonError("Invalid value", 400);
-
-  // 3) service db
-  const db = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false } });
-
-  // Membership check (pool_members heeft GEEN id, dus select 1)
-  const { data: memberRow, error: memberErr } = await db
-    .from("pool_members")
-    .select("pool_id")
-    .eq("pool_id", poolId)
-    .eq("user_id", userId)
-    .maybeSingle();
-
-  if (memberErr) return jsonError(memberErr.message, 500);
-  if (!memberRow) return jsonError("Not a pool member", 403);
-
-  // Bestaat set?
-  const { data: setRow, error: setErr } = await db
-    .from("pool_event_bonus_sets")
-    .select("id, lock_at")
-    .eq("pool_id", poolId)
-    .eq("event_id", eventId)
-    .maybeSingle();
-
-  if (setErr) return jsonError(setErr.message, 500);
-  if (!setRow) return jsonError("No bonus set for this weekend", 404);
-
-  // Locked?
-  const isLocked = !!setRow.lock_at && new Date(setRow.lock_at).getTime() <= Date.now();
-  if (isLocked) return jsonError("Bonusvragen zijn gelocked", 423);
-
-  // Check dat questionId echt in deze set zit
-  const { data: linkRow, error: linkErr } = await db
-    .from("pool_event_bonus_set_questions")
-    .select("question_id")
-    .eq("set_id", setRow.id)
-    .eq("question_id", questionId)
-    .maybeSingle();
-
-  if (linkErr) return jsonError(linkErr.message, 500);
-  if (!linkRow) return jsonError("Question not in this set", 400);
-
-  // Haal huidige answer op (alleen voor deze vraag)
-const { data: existing, error: exErr } = await db
-  .from("bonus_weekend_answers")
-  .select("answer_json")
-  .eq("pool_id", poolId)
-  .eq("event_id", eventId)
-  .eq("user_id", userId)
-  .eq("question_id", questionId)
-  .maybeSingle();
-
-if (exErr) return jsonError(exErr.message, 500);
-
-  // value kan true/false/number/string/null zijn
-if (value === null) {
-  // delete answer row voor deze vraag
-  const { error: delErr } = await db
-    .from("bonus_weekend_answers")
-    .delete()
-    .eq("pool_id", poolId)
-    .eq("event_id", eventId)
-    .eq("user_id", userId)
-    .eq("question_id", questionId);
-
-  if (delErr) return jsonError(delErr.message, 500);
-  return NextResponse.json({ ok: true });
+function getBearerToken(req: Request): string | null {
+  const h = req.headers.get("authorization") ?? "";
+  const m = h.match(/^Bearer\s+(.+)$/i);
+  return m ? m[1] : null;
 }
 
-// upsert 1 rij per vraag
-const payload = {
-  pool_id: poolId,
-  event_id: eventId,
-  user_id: userId,
-  question_id: questionId,
-  answer_json: value,
-};
+async function getUserFromToken(accessToken: string) {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+  const supa = createClient(url, anon, { auth: { persistSession: false } });
 
-const { data, error: upErr } = await db
-  .from("bonus_weekend_answers")
-  .upsert(payload, { onConflict: "pool_id,event_id,user_id,question_id" })
-  .select("question_id, answer_json");
+  const { data, error } = await supa.auth.getUser(accessToken);
+  if (error || !data?.user) return null;
+  return data.user;
+}
 
-if (upErr) return jsonError(upErr.message, 500);
+export async function POST(req: Request) {
+  try {
+    const accessToken =
+      getBearerToken(req) || new URL(req.url).searchParams.get("accessToken");
+    if (!accessToken) return jsonError("Missing accessToken", 401);
 
-const row = Array.isArray(data) ? data[0] : data;
+    const user = await getUserFromToken(accessToken);
+    if (!user) return jsonError("Invalid session", 401);
 
-return NextResponse.json({
-  ok: true,
-  answers: row ? { [row.question_id]: row.answer_json } : {},
-});
+    const body = await req.json();
+
+    // Verwacht minimaal dit:
+    const poolId = String(body.pool_id ?? "");
+    const eventId = String(body.event_id ?? "");
+    const questionId = String(body.question_id ?? "");
+    const answerJson = body.answer_json; // boolean / jsonb
+
+    if (!poolId || !eventId || !questionId) {
+      return jsonError("Missing pool_id/event_id/question_id", 400);
+    }
+
+    const admin = supabaseAdmin();
+
+    // 1) membership check: user moet in pool zitten
+    const { data: membership, error: memErr } = await admin
+      .from("pool_members")
+      .select("pool_id,user_id")
+      .eq("pool_id", poolId)
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    if (memErr) return jsonError(memErr.message, 500);
+    if (!membership) return jsonError("Not a pool member", 403);
+
+    // 2) haal set_id op voor dit weekend (pool+event)
+    const { data: setRow, error: setErr } = await admin
+      .from("pool_event_bonus_sets")
+      .select("id")
+      .eq("pool_id", poolId)
+      .eq("event_id", eventId)
+      .maybeSingle();
+
+    if (setErr) return jsonError(setErr.message, 500);
+    if (!setRow?.id) return jsonError("No bonus set for this event", 400);
+
+    const setId = setRow.id as string;
+
+    // 3) check: questionId moet in de 3 gekozen vragen van deze set zitten
+    const { data: sq, error: sqErr } = await admin
+      .from("pool_event_bonus_set_questions")
+      .select("question_id")
+      .eq("set_id", setId)
+      .eq("question_id", questionId)
+      .maybeSingle();
+
+    if (sqErr) return jsonError(sqErr.message, 500);
+    if (!sq) return jsonError("Question not part of this weekend set", 400);
+
+    // 4) upsert row-per-question
+    const { error: upErr } = await admin
+      .from("bonus_weekend_answers")
+      .upsert(
+        {
+          set_id: setId,
+          pool_id: poolId,
+          event_id: eventId,
+          user_id: user.id,
+          question_id: questionId,
+          answer_json: answerJson,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "set_id,user_id,question_id" }
+      );
+
+    if (upErr) return jsonError(upErr.message, 500);
+
+    return NextResponse.json({ ok: true });
+  } catch (e: any) {
+    return jsonError(e?.message ?? "Unknown error", 500);
+  }
 }
