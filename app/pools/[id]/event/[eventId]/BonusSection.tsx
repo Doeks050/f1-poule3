@@ -129,7 +129,7 @@ export default function BonusSection({
 
     try {
       // ✅ juiste route + juiste keys (snake_case)
-      const res = await fetch("/api/bonus/weekend-answer", {
+      const res = await fetch("/api/bonus/weekend-answers", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
