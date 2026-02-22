@@ -23,6 +23,16 @@ type BonusSet = {
 
 type AnswersMap = Record<string, boolean>;
 
+async function safeJson(res: Response): Promise<any> {
+  const text = await res.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { _raw: text };
+  }
+}
+
 export default function BonusSection({
   poolId,
   eventId,
@@ -66,18 +76,23 @@ export default function BonusSection({
       }
 
       try {
-        const res = await fetch(`/api/bonus/weekend-set?poolId=${poolId}&eventId=${eventId}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        const res = await fetch(
+          `/api/bonus/weekend-set?poolId=${poolId}&eventId=${eventId}`,
+          {
+            headers: { authorization: `Bearer ${token}` },
+          }
+        );
 
-        const json = await res.json();
-        if (!res.ok) throw new Error(json?.error || "Failed to load weekend bonus");
+        const json = await safeJson(res);
+        if (!res.ok) {
+          throw new Error(json?.error || json?._raw || `Failed to load weekend bonus (${res.status})`);
+        }
 
         if (!cancelled) {
-          setSetRow(json.set ?? null);
-          setQuestions(json.questions ?? []);
-          setIsLocked(!!json.isLocked);
-          setAnswers((json.answers ?? {}) as AnswersMap);
+          setSetRow(json?.set ?? null);
+          setQuestions(json?.questions ?? []);
+          setIsLocked(!!json?.isLocked);
+          setAnswers((json?.answers ?? {}) as AnswersMap);
           setLoading(false);
         }
       } catch (e: any) {
@@ -118,7 +133,7 @@ export default function BonusSection({
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
+          authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
           pool_id: poolId,
@@ -128,10 +143,12 @@ export default function BonusSection({
         }),
       });
 
-      const json = await res.json();
-      if (!res.ok) throw new Error(json?.error || "Opslaan mislukt");
+      const json = await safeJson(res);
+      if (!res.ok) {
+        throw new Error(json?.error || json?._raw || `Opslaan mislukt (${res.status})`);
+      }
 
-      // Server antwoord is { ok: true }. Local state is al source of truth.
+      // Server hoeft geen answers terug te sturen; wij houden local state als UI-state.
     } catch (e: any) {
       setMsg(e?.message || "Onbekende fout");
     } finally {
