@@ -348,26 +348,48 @@ export default function AdminBonusPage() {
       if (questionIds.length === 0) return setMsg("No questions configured for this set.");
 
       // Alleen opslaan voor de 3 vragen in de set
-      const rows = questionIds.map((qid) => ({
-  pool_id: selectedPoolId,
-  event_id: selectedEventId,
-  set_id: setId,
-  question_id: qid,
-  answer_json: { value: weekendAnswers[qid] ?? null },
-}));
+      async function saveWeekendAll() {
+  setMsg(null);
+  if (!selectedPoolId) return setMsg("Select a pool first.");
+  if (!selectedEventId) return setMsg("Select an event first.");
 
-      const { error } = await supabase
-        .from("weekend_bonus_official_answers")
-        .upsert(rows, { onConflict: "set_id,question_id" });
+  try {
+    // 1) haal admin user id op (voor decided_by)
+    const { data: userData, error: userErr } = await supabase.auth.getUser();
+    if (userErr) throw userErr;
+    const user = userData.user;
+    if (!user) return setMsg("Not logged in.");
 
-      if (error) throw error;
+    // 2) set + 3 question ids
+    const { setId, questionIds } = await loadWeekendSetQuestionIds(
+      selectedPoolId,
+      selectedEventId
+    );
 
-      setMsg("✅ Weekend bonus official answers saved for this set.");
-    } catch (e: any) {
-      setMsg(e?.message ?? "Save weekend error");
-    }
+    if (!setId) return setMsg("No weekend bonus set found for this pool + event.");
+    if (questionIds.length === 0) return setMsg("No questions configured for this set.");
+
+    // 3) rows: nu incl. pool_id/event_id/decided_by (alle NOT NULL velden)
+    const rows = questionIds.map((qid) => ({
+      pool_id: selectedPoolId,
+      event_id: selectedEventId,
+      set_id: setId,
+      question_id: qid,
+      answer_json: { value: weekendAnswers[qid] ?? null },
+      decided_by: user.id,
+    }));
+
+    const { error } = await supabase
+      .from("weekend_bonus_official_answers")
+      .upsert(rows, { onConflict: "set_id,question_id" });
+
+    if (error) throw error;
+
+    setMsg("✅ Weekend bonus official answers saved for this set.");
+  } catch (e: any) {
+    setMsg(e?.message ?? "Save weekend error");
   }
-
+}
   async function logout() {
     await supabase.auth.signOut();
     router.replace("/login");
