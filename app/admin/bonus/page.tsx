@@ -358,13 +358,10 @@ export default function AdminBonusPage() {
       if (questionIds.length === 0) return setMsg("No questions configured for this set.");
 
       // Alleen opslaan voor de 3 vragen in de set (niet de hele bank)
-      const rows = questionIds.map((qid) => ({
-        set_id: setId,
-        pool_id: selectedPoolId,
-        event_id: selectedEventId,
-        question_id: qid,
-        answer_json: { value: weekendAnswers[qid] ?? null },
-        updated_by: user?.id ?? null,
+      const rows = seasonQuestions.map((q) => ({
+      season: seasonYear,
+      question_id: q.id,
+      answer_json: { value: seasonAnswers[q.id] ?? null },
       }));
 
       const { error } = await supabase
