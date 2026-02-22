@@ -143,7 +143,6 @@ export default function AdminBonusPage() {
   }
 
   async function loadPools() {
-    // Minimal: pak alle pools (admin kan dit zien), anders pas je dit later aan naar jouw gewenste scope.
     const { data, error } = await supabase.from("pools").select("id,name").order("name");
     if (error) throw error;
     return (data ?? []) as PoolRow[];
@@ -242,7 +241,6 @@ export default function AdminBonusPage() {
       if (pls.length > 0) setSelectedPoolId(pls[0].id);
       if (ev.length > 0) setSelectedEventId(ev[0].id);
 
-      // season answers
       const sa = await loadSeasonAnswers(seasonYear);
       setSeasonAnswers(sa);
     } catch (e: any) {
@@ -255,7 +253,6 @@ export default function AdminBonusPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // reload season answers when year changes
   useEffect(() => {
     (async () => {
       if (!isAdmin) return;
@@ -270,7 +267,6 @@ export default function AdminBonusPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seasonYear, isAdmin]);
 
-  // ✅ reload weekend set questions + answers when pool/event changes
   useEffect(() => {
     (async () => {
       if (!isAdmin) return;
@@ -279,7 +275,6 @@ export default function AdminBonusPage() {
       try {
         setMsg(null);
 
-        // 1) set + questionIds
         const { setId, questionIds } = await loadWeekendSetQuestionIds(
           selectedPoolId,
           selectedEventId
@@ -292,11 +287,9 @@ export default function AdminBonusPage() {
           return;
         }
 
-        // 2) fetch only those 3 questions
         const qs = await loadWeekendQuestionsForSet(questionIds);
         setWeekendQuestions(qs);
 
-        // 3) fetch official answers for this set
         const wa = await loadWeekendOfficialAnswersBySet(setId);
         setWeekendAnswers(wa);
       } catch (e: any) {
@@ -339,14 +332,11 @@ export default function AdminBonusPage() {
     }
   }
 
-  // ✅ Save weekend official answers per set_id + question_id
+  // ✅ FIXED: Save weekend official answers per set_id + question_id (geen season kolom!)
   async function saveWeekendAll() {
     setMsg(null);
     if (!selectedPoolId) return setMsg("Select a pool first.");
     if (!selectedEventId) return setMsg("Select an event first.");
-
-    const { data: userData } = await supabase.auth.getUser();
-    const user = userData.user;
 
     try {
       const { setId, questionIds } = await loadWeekendSetQuestionIds(
@@ -357,11 +347,11 @@ export default function AdminBonusPage() {
       if (!setId) return setMsg("No weekend bonus set found for this pool + event.");
       if (questionIds.length === 0) return setMsg("No questions configured for this set.");
 
-      // Alleen opslaan voor de 3 vragen in de set (niet de hele bank)
-      const rows = seasonQuestions.map((q) => ({
-      season: seasonYear,
-      question_id: q.id,
-      answer_json: { value: seasonAnswers[q.id] ?? null },
+      // Alleen opslaan voor de 3 vragen in de set
+      const rows = questionIds.map((qid) => ({
+        set_id: setId,
+        question_id: qid,
+        answer_json: { value: weekendAnswers[qid] ?? null },
       }));
 
       const { error } = await supabase
@@ -400,175 +390,139 @@ export default function AdminBonusPage() {
     );
   }
 
-  const renderAnswerInput = (
-    q: BonusQuestionRow,
-    value: any,
-    onChange: (v: any) => void
-  ) => {
-    if (q.answer_kind === "boolean") {
-      return (
-        <select
-          value={value === true ? "true" : value === false ? "false" : ""}
-          onChange={(e) =>
-            onChange(e.target.value === "" ? null : e.target.value === "true")
-          }
-          style={{ width: "100%", padding: 8 }}
-        >
-          <option value="">— Select —</option>
-          <option value="true">Yes</option>
-          <option value="false">No</option>
-        </select>
-      );
-    }
-
-    if (q.answer_kind === "number") {
-      return (
-        <input
-          type="number"
-          value={value ?? ""}
-          onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))}
-          style={{ width: "100%", padding: 8 }}
-          placeholder="Number…"
-        />
-      );
-    }
-
-    if (q.answer_kind === "driver") {
-      return (
-        <select
-          value={value ?? ""}
-          onChange={(e) => onChange(normalizeCode(e.target.value))}
-          style={{ width: "100%", padding: 8 }}
-        >
-          <option value="">— Select driver —</option>
-          {F1_DRIVERS_2026.map((d) => (
-            <option key={d.code} value={d.code}>
-              {d.code} — {d.name} ({d.teamName})
-            </option>
-          ))}
-        </select>
-      );
-    }
-
-    if (q.answer_kind === "team") {
-      return (
-        <select
-          value={value ?? ""}
-          onChange={(e) => onChange(e.target.value)}
-          style={{ width: "100%", padding: 8 }}
-        >
-          <option value="">— Select team —</option>
-          {TEAM_OPTIONS.map((t) => (
-            <option key={t.teamId} value={t.teamId}>
-              {t.teamName}
-            </option>
-          ))}
-        </select>
-      );
-    }
-
-    // text
-    return (
-      <input
-        value={value ?? ""}
-        onChange={(e) => onChange(e.target.value)}
-        style={{ width: "100%", padding: 8 }}
-        placeholder="Text…"
-      />
-    );
-  };
-
   return (
-    <main style={{ padding: 16, maxWidth: 980 }}>
-      <h1>Admin Bonus</h1>
-      <p>Logged in as: {email}</p>
+    <main style={{ padding: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+        <div>
+          <div style={{ fontSize: 12, opacity: 0.7 }}>Logged in as: {email}</div>
+          <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
+            <button
+              onClick={() => setTab("season")}
+              style={{
+                padding: "8px 12px",
+                borderRadius: 999,
+                border: "1px solid #ddd",
+                background: tab === "season" ? "black" : "white",
+                color: tab === "season" ? "white" : "black",
+              }}
+            >
+              Season bonus
+            </button>
+            <button
+              onClick={() => setTab("weekend")}
+              style={{
+                padding: "8px 12px",
+                borderRadius: 999,
+                border: "1px solid #ddd",
+                background: tab === "weekend" ? "black" : "white",
+                color: tab === "weekend" ? "white" : "black",
+              }}
+            >
+              Weekend bonus
+            </button>
+          </div>
+        </div>
 
-      <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
-        <button
-          onClick={() => setTab("season")}
-          style={{
-            padding: "8px 12px",
-            borderRadius: 10,
-            border: "1px solid #ccc",
-            background: tab === "season" ? "#111" : "#fff",
-            color: tab === "season" ? "#fff" : "#111",
-          }}
-        >
-          Season bonus
-        </button>
-        <button
-          onClick={() => setTab("weekend")}
-          style={{
-            padding: "8px 12px",
-            borderRadius: 10,
-            border: "1px solid #ccc",
-            background: tab === "weekend" ? "#111" : "#fff",
-            color: tab === "weekend" ? "#fff" : "#111",
-          }}
-        >
-          Weekend bonus
-        </button>
-
-        <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
           <button onClick={() => router.replace("/admin/results")}>Back to Results</button>
           <button onClick={logout}>Logout</button>
         </div>
       </div>
 
-      {tab === "season" && (
-        <section style={{ marginTop: 18 }}>
-          <h2>Season bonus official answers</h2>
+      <h1 style={{ marginTop: 18 }}>
+        {tab === "season" ? "Season bonus official answers" : "Weekend bonus official answers"}
+      </h1>
 
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10 }}>
-            <label style={{ fontWeight: 700 }}>Season:</label>
-            <input
-              type="number"
-              value={seasonYear}
-              onChange={(e) => setSeasonYear(Number(e.target.value))}
-              style={{ width: 110, padding: 8 }}
-            />
-            <button onClick={saveSeasonAll} style={{ marginLeft: 8 }}>
-              Save season answers
-            </button>
+      {msg && <p style={{ color: msg.startsWith("✅") ? "green" : "crimson" }}>{msg}</p>}
+
+      {tab === "season" && (
+        <section style={{ marginTop: 14 }}>
+          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+            <label>
+              Season:&nbsp;
+              <input
+                type="number"
+                value={seasonYear}
+                onChange={(e) => setSeasonYear(Number(e.target.value))}
+                style={{ width: 90 }}
+              />
+            </label>
+            <button onClick={saveSeasonAll}>Save season answers</button>
           </div>
 
-          <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
+          <div style={{ marginTop: 18, display: "grid", gap: 14 }}>
             {seasonQuestions.map((q) => (
-              <div
-                key={q.id}
-                style={{
-                  border: "1px solid #e5e5e5",
-                  borderRadius: 12,
-                  padding: 12,
-                }}
-              >
-                <div style={{ fontWeight: 800 }}>{q.prompt}</div>
-                <div style={{ fontSize: 12, opacity: 0.75, marginTop: 4 }}>
-                  kind: {q.answer_kind} • id: {q.id}
-                </div>
-                <div style={{ marginTop: 10 }}>
-                  {renderAnswerInput(q, seasonAnswers[q.id], (v) => setSeasonValue(q.id, v))}
-                </div>
+              <div key={q.id} style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
+                <div style={{ fontWeight: 700 }}>{q.prompt}</div>
+                <div style={{ fontSize: 12, opacity: 0.7 }}>kind: {q.answer_kind} • id: {q.id}</div>
+
+                {q.answer_kind === "boolean" ? (
+                  <select
+                    value={
+                      seasonAnswers[q.id] === true
+                        ? "true"
+                        : seasonAnswers[q.id] === false
+                        ? "false"
+                        : ""
+                    }
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setSeasonValue(q.id, v === "" ? null : v === "true");
+                    }}
+                    style={{ marginTop: 8, width: "100%", padding: 8 }}
+                  >
+                    <option value="">— Select —</option>
+                    <option value="true">Yes</option>
+                    <option value="false">No</option>
+                  </select>
+                ) : q.answer_kind === "driver" ? (
+                  <select
+                    value={seasonAnswers[q.id] ?? ""}
+                    onChange={(e) => setSeasonValue(q.id, normalizeCode(e.target.value))}
+                    style={{ marginTop: 8, width: "100%", padding: 8 }}
+                  >
+                    <option value="">— Select driver —</option>
+                    {F1_DRIVERS_2026.map((d) => (
+                      <option key={d.code} value={d.code}>
+                        {d.name} ({d.code}) — {d.teamName}
+                      </option>
+                    ))}
+                  </select>
+                ) : q.answer_kind === "team" ? (
+                  <select
+                    value={seasonAnswers[q.id] ?? ""}
+                    onChange={(e) => setSeasonValue(q.id, e.target.value)}
+                    style={{ marginTop: 8, width: "100%", padding: 8 }}
+                  >
+                    <option value="">— Select team —</option>
+                    {TEAM_OPTIONS.map((t) => (
+                      <option key={t.teamId} value={t.teamId}>
+                        {t.teamName}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    value={seasonAnswers[q.id] ?? ""}
+                    onChange={(e) => setSeasonValue(q.id, e.target.value)}
+                    style={{ marginTop: 8, width: "100%", padding: 8 }}
+                  />
+                )}
               </div>
             ))}
-            {seasonQuestions.length === 0 && (
-              <p style={{ opacity: 0.8 }}>No active season questions found.</p>
-            )}
           </div>
         </section>
       )}
 
       {tab === "weekend" && (
-        <section style={{ marginTop: 18 }}>
-          <h2>Weekend bonus official answers</h2>
-
-          <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <label style={{ fontWeight: 700 }}>Pool:</label>
+        <section style={{ marginTop: 14 }}>
+          <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+            <label>
+              Pool:&nbsp;
               <select
                 value={selectedPoolId}
                 onChange={(e) => setSelectedPoolId(e.target.value)}
-                style={{ width: 520, padding: 8 }}
+                style={{ padding: 8, minWidth: 380 }}
               >
                 {pools.map((p) => (
                   <option key={p.id} value={p.id}>
@@ -576,69 +530,73 @@ export default function AdminBonusPage() {
                   </option>
                 ))}
               </select>
-              {selectedPool ? (
-                <span style={{ fontSize: 12, opacity: 0.75 }}>({selectedPool.id})</span>
-              ) : null}
-            </div>
+            </label>
 
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <label style={{ fontWeight: 700 }}>Event:</label>
+            <span style={{ fontSize: 12, opacity: 0.7 }}>
+              {selectedPoolId ? `(${selectedPoolId})` : ""}
+            </span>
+
+            <label>
+              Event:&nbsp;
               <select
                 value={selectedEventId}
                 onChange={(e) => setSelectedEventId(e.target.value)}
-                style={{ width: 520, padding: 8 }}
+                style={{ padding: 8, minWidth: 520 }}
               >
-                {events.map((e) => (
-                  <option key={e.id} value={e.id}>
-                    {e.name} {e.starts_at ? `(${e.starts_at})` : ""}
+                {events.map((ev) => (
+                  <option key={ev.id} value={ev.id}>
+                    {ev.name}
                   </option>
                 ))}
               </select>
+            </label>
 
-              <button onClick={saveWeekendAll} style={{ marginLeft: 8 }}>
-                Save weekend answers
-              </button>
-            </div>
+            <button onClick={saveWeekendAll}>Save weekend answers</button>
           </div>
 
-          {selectedEvent ? (
-            <div style={{ marginTop: 8, fontSize: 13, opacity: 0.8 }}>
-              Selected: <strong>{selectedEvent.name}</strong>
-              {selectedEvent.format ? ` • ${selectedEvent.format}` : ""}
+          {selectedEvent && (
+            <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
+              Selected: <b>{selectedEvent.name}</b> • {selectedEvent.format ?? "standard"}
             </div>
-          ) : null}
+          )}
 
-          <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
+          <div style={{ marginTop: 18, display: "grid", gap: 14 }}>
             {weekendQuestions.map((q) => (
-              <div
-                key={q.id}
-                style={{
-                  border: "1px solid #e5e5e5",
-                  borderRadius: 12,
-                  padding: 12,
-                }}
-              >
-                <div style={{ fontWeight: 800 }}>{q.prompt}</div>
-                <div style={{ fontSize: 12, opacity: 0.75, marginTop: 4 }}>
-                  kind: {q.answer_kind} • id: {q.id}
-                </div>
-                <div style={{ marginTop: 10 }}>
-                  {renderAnswerInput(q, weekendAnswers[q.id], (v) => setWeekendValue(q.id, v))}
-                </div>
+              <div key={q.id} style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
+                <div style={{ fontWeight: 700 }}>{q.prompt}</div>
+                <div style={{ fontSize: 12, opacity: 0.7 }}>kind: {q.answer_kind} • id: {q.id}</div>
+
+                {q.answer_kind === "boolean" ? (
+                  <select
+                    value={
+                      weekendAnswers[q.id] === true
+                        ? "true"
+                        : weekendAnswers[q.id] === false
+                        ? "false"
+                        : ""
+                    }
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setWeekendValue(q.id, v === "" ? null : v === "true");
+                    }}
+                    style={{ marginTop: 8, width: "100%", padding: 8 }}
+                  >
+                    <option value="">— Select —</option>
+                    <option value="true">Yes</option>
+                    <option value="false">No</option>
+                  </select>
+                ) : (
+                  <input
+                    value={weekendAnswers[q.id] ?? ""}
+                    onChange={(e) => setWeekendValue(q.id, e.target.value)}
+                    style={{ marginTop: 8, width: "100%", padding: 8 }}
+                  />
+                )}
               </div>
             ))}
-            {weekendQuestions.length === 0 && (
-              <p style={{ opacity: 0.8 }}>
-                No weekend questions found for this pool+event set (check the set generator).
-              </p>
-            )}
           </div>
         </section>
       )}
-
-      {msg ? (
-        <p style={{ marginTop: 14, color: msg.startsWith("✅") ? "green" : "crimson" }}>{msg}</p>
-      ) : null}
     </main>
   );
 }
