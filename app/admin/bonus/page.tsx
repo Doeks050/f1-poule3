@@ -349,10 +349,12 @@ export default function AdminBonusPage() {
 
       // Alleen opslaan voor de 3 vragen in de set
       const rows = questionIds.map((qid) => ({
-        set_id: setId,
-        question_id: qid,
-        answer_json: { value: weekendAnswers[qid] ?? null },
-      }));
+  pool_id: selectedPoolId,
+  event_id: selectedEventId,
+  set_id: setId,
+  question_id: qid,
+  answer_json: { value: weekendAnswers[qid] ?? null },
+}));
 
       const { error } = await supabase
         .from("weekend_bonus_official_answers")
