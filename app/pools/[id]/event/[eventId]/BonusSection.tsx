@@ -113,23 +113,25 @@ export default function BonusSection({
     }
 
     try {
-      const res = await fetch("/api/bonus/weekend-answers", {
+      // ✅ juiste route + juiste keys (snake_case)
+      const res = await fetch("/api/bonus/weekend-answer", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ poolId, eventId, questionId, value }),
+        body: JSON.stringify({
+          pool_id: poolId,
+          event_id: eventId,
+          question_id: questionId,
+          answer_json: value, // true/false/null (null = wissen)
+        }),
       });
 
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error || "Opslaan mislukt");
 
-      // server is source of truth
-      setAnswers((prev) => ({
-  ...prev,
-  ...((json.answers ?? {}) as AnswersMap),
-  }));
+      // Server antwoord is { ok: true }. Local state is al source of truth.
     } catch (e: any) {
       setMsg(e?.message || "Onbekende fout");
     } finally {
@@ -216,12 +218,13 @@ export default function BonusSection({
                           type="button"
                           disabled={disabled}
                           onClick={() => {
-                            // remove answer
+                            // remove answer locally
                             setAnswers((prev) => {
                               const copy = { ...prev };
                               delete copy[q.id];
                               return copy;
                             });
+                            // ✅ send null to clear
                             saveAnswer(q.id, null);
                           }}
                           style={{
