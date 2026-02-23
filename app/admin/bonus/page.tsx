@@ -49,32 +49,38 @@ export default function AdminBonusPage() {
     [events, selectedEventId]
   );
 
+  // NOTE: hooks must run before any conditional return (fix React error #310)
+  const weekendSetInfo = useMemo(() => {
+    if (!selectedPoolId || !selectedEventId) return null;
+    return { poolId: selectedPoolId, eventId: selectedEventId };
+  }, [selectedPoolId, selectedEventId]);
+
   // ---- data loaders ----
 
   async function requireAdmin() {
-  const { data } = await supabase.auth.getUser();
+    const { data } = await supabase.auth.getUser();
 
-  if (!data.user) {
-    router.replace("/login");
-    return null;
+    if (!data.user) {
+      router.replace("/login");
+      return null;
+    }
+
+    setUserEmail(data.user.email ?? null);
+
+    // ✅ Admin check via app_admins (niet via profiles)
+    const { data: adminRow, error: adminErr } = await supabase
+      .from("app_admins")
+      .select("user_id")
+      .eq("user_id", data.user.id)
+      .maybeSingle();
+
+    if (adminErr || !adminRow) {
+      router.replace("/pools");
+      return null;
+    }
+
+    return data.user;
   }
-
-  setUserEmail(data.user.email ?? null);
-
-  // ✅ Admin check via app_admins (niet via profiles)
-  const { data: adminRow, error: adminErr } = await supabase
-    .from("app_admins")
-    .select("user_id")
-    .eq("user_id", data.user.id)
-    .maybeSingle();
-
-  if (adminErr || !adminRow) {
-    router.replace("/pools");
-    return null;
-  }
-
-  return data.user;
-}
 
   async function loadPools() {
     const { data, error } = await supabase.from("pools").select("id,name").order("name");
@@ -294,11 +300,7 @@ export default function AdminBonusPage() {
 
   // ---- render helpers ----
 
-  function renderInput(
-    q: BonusQuestion,
-    value: any,
-    onChange: (v: any) => void
-  ) {
+  function renderInput(q: BonusQuestion, value: any, onChange: (v: any) => void) {
     if (q.kind === "boolean") {
       return (
         <select
@@ -362,18 +364,11 @@ export default function AdminBonusPage() {
     );
   }
 
-  const weekendSetInfo = useMemo(() => {
-    if (!selectedPoolId || !selectedEventId) return null;
-    return { poolId: selectedPoolId, eventId: selectedEventId };
-  }, [selectedPoolId, selectedEventId]);
-
   return (
     <div style={{ padding: 24, maxWidth: 980 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
         <div>
-          <div style={{ fontSize: 14, opacity: 0.8 }}>
-            Logged in as: {userEmail ?? "-"}
-          </div>
+          <div style={{ fontSize: 14, opacity: 0.8 }}>Logged in as: {userEmail ?? "-"}</div>
 
           <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
             <button onClick={() => router.push("/admin/results")}>Back to Results</button>
@@ -382,10 +377,7 @@ export default function AdminBonusPage() {
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <button
-            onClick={saveSeasonAll}
-            style={{ padding: "8px 12px" }}
-          >
+          <button onClick={saveSeasonAll} style={{ padding: "8px 12px" }}>
             Save season answers
           </button>
           <button
@@ -477,9 +469,7 @@ export default function AdminBonusPage() {
                 </div>
 
                 <div style={{ marginTop: 10 }}>
-                  {renderInput(q, v, (nv) =>
-                    setWeekendAnswers((prev) => ({ ...prev, [q.id]: nv }))
-                  )}
+                  {renderInput(q, v, (nv) => setWeekendAnswers((prev) => ({ ...prev, [q.id]: nv })))}
                 </div>
               </div>
             );
@@ -509,9 +499,7 @@ export default function AdminBonusPage() {
               </div>
 
               <div style={{ marginTop: 10 }}>
-                {renderInput(q, v, (nv) =>
-                  setSeasonAnswers((prev) => ({ ...prev, [q.id]: nv }))
-                )}
+                {renderInput(q, v, (nv) => setSeasonAnswers((prev) => ({ ...prev, [q.id]: nv })))}
               </div>
             </div>
           );
