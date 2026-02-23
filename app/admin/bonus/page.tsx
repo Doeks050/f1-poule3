@@ -98,19 +98,49 @@ export default function AdminBonusPage() {
   }
 
   async function loadQuestions() {
-    const { data, error } = await supabase
-      .from("bonus_question_bank")
-      .select("*")
-      .eq("active", true)
-      .order("scope")
-      .order("points", { ascending: false });
+  const { data, error } = await supabase
+    .from("bonus_question_bank")
+    .select("*"); // haal alles op, we normalizen client-side
 
-    if (error) throw error;
+  if (error) throw error;
 
-    const all = (data ?? []) as BonusQuestion[];
-    setSeasonQuestions(all.filter((q) => q.scope === "season"));
-    setWeekendQuestions(all.filter((q) => q.scope === "weekend"));
-  }
+  // Normalize zodat we niet kapot gaan op null/andere kolomnamen
+  const allRaw = (data ?? []) as any[];
+
+  const all: BonusQuestion[] = allRaw.map((r) => {
+    const active =
+      typeof r.active === "boolean"
+        ? r.active
+        : typeof r.is_active === "boolean"
+        ? r.is_active
+        : true; // default true als kolom ontbreekt
+
+    const scope =
+      (r.scope as "season" | "weekend" | undefined) ??
+      (r.question_scope as "season" | "weekend" | undefined) ??
+      "weekend"; // default weekend als null/ontbreekt
+
+    const kind =
+      (r.kind as BonusQuestion["kind"] | undefined) ??
+      (r.type as BonusQuestion["kind"] | undefined) ??
+      "text";
+
+    return {
+      id: String(r.id),
+      question: String(r.question ?? r.title ?? ""),
+      kind,
+      choices: (r.choices ?? r.options ?? null) as string[] | null,
+      points: Number(r.points ?? 0),
+      active,
+      scope,
+    };
+  });
+
+  const activeOnly = all.filter((q) => q.active);
+
+  setSeasonQuestions(activeOnly.filter((q) => q.scope === "season"));
+  setWeekendQuestions(activeOnly.filter((q) => q.scope !== "season")); // alles wat niet season is -> weekend
+}
 
   async function loadSeasonOfficialAnswers() {
     const { data, error } = await supabase
