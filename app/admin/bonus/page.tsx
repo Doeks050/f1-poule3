@@ -2,276 +2,108 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@supabase/supabase-js";
-
-// ---- Hardcoded lists (zoals je al had) ----
-const F1_DRIVERS_2026 = [
-  { code: "VER", name: "Max Verstappen", teamName: "Red Bull" },
-  { code: "PER", name: "Sergio Pérez", teamName: "Red Bull" },
-  { code: "LEC", name: "Charles Leclerc", teamName: "Ferrari" },
-  { code: "HAM", name: "Lewis Hamilton", teamName: "Ferrari" },
-  { code: "NOR", name: "Lando Norris", teamName: "McLaren" },
-  { code: "PIA", name: "Oscar Piastri", teamName: "McLaren" },
-  { code: "RUS", name: "George Russell", teamName: "Mercedes" },
-  { code: "ANT", name: "Andrea Kimi Antonelli", teamName: "Mercedes" },
-  { code: "ALO", name: "Fernando Alonso", teamName: "Aston Martin" },
-  { code: "STR", name: "Lance Stroll", teamName: "Aston Martin" },
-  { code: "SAI", name: "Carlos Sainz", teamName: "Williams" },
-  { code: "ALB", name: "Alex Albon", teamName: "Williams" },
-  { code: "OCO", name: "Esteban Ocon", teamName: "Haas" },
-  { code: "BEA", name: "Oliver Bearman", teamName: "Haas" },
-  { code: "GAS", name: "Pierre Gasly", teamName: "Alpine" },
-  { code: "DOO", name: "Jack Doohan", teamName: "Alpine" },
-  { code: "TSU", name: "Yuki Tsunoda", teamName: "Racing Bulls" },
-  { code: "LAW", name: "Liam Lawson", teamName: "Racing Bulls" },
-  { code: "BOT", name: "Valtteri Bottas", teamName: "Sauber" },
-  { code: "ZHO", name: "Guanyu Zhou", teamName: "Sauber" },
-  { code: "CAD1", name: "Cadillac Driver 1", teamName: "Cadillac" },
-  { code: "CAD2", name: "Cadillac Driver 2", teamName: "Cadillac" },
-  { code: "AUD1", name: "Audi Driver 1", teamName: "Audi" },
-  { code: "AUD2", name: "Audi Driver 2", teamName: "Audi" },
-];
-
-const TEAM_OPTIONS = [
-  { teamId: "red_bull", teamName: "Red Bull" },
-  { teamId: "ferrari", teamName: "Ferrari" },
-  { teamId: "mclaren", teamName: "McLaren" },
-  { teamId: "mercedes", teamName: "Mercedes" },
-  { teamId: "aston_martin", teamName: "Aston Martin" },
-  { teamId: "williams", teamName: "Williams" },
-  { teamId: "alpine", teamName: "Alpine" },
-  { teamId: "haas", teamName: "Haas" },
-  { teamId: "racing_bulls", teamName: "Racing Bulls" },
-  { teamId: "sauber", teamName: "Sauber" },
-  { teamId: "cadillac", teamName: "Cadillac" },
-  { teamId: "audi", teamName: "Audi" },
-];
+import { supabase } from "../../lib/supabaseClient";
 
 type PoolRow = { id: string; name: string };
-type EventRow = { id: string; name: string; starts_at: string | null; weekend_type: string | null };
+type EventRow = { id: string; name: string; starts_at: string | null; weekend_type?: string | null };
 
-type BonusQuestionRow = {
+type BonusQuestion = {
   id: string;
-  prompt: string;
-  answer_kind: "boolean" | "driver" | "team" | "text";
+  question: string;
+  kind: "boolean" | "number" | "text" | "choice";
+  choices?: string[] | null;
+  points: number;
+  active: boolean;
+  scope: "season" | "weekend";
 };
-
-function normalizeCode(s: string) {
-  return (s ?? "").trim().toUpperCase();
-}
 
 export default function AdminBonusPage() {
   const router = useRouter();
 
-  const supabase = useMemo(() => {
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-    const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-    return createClient(url, anon);
-  }, []);
-
   const [loading, setLoading] = useState(true);
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [email, setEmail] = useState<string>("");
+  const [msg, setMsg] = useState<string | null>(null);
 
-  const [tab, setTab] = useState<"season" | "weekend">("weekend");
-  const [msg, setMsg] = useState<string>("");
+  const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  // Pools + events
   const [pools, setPools] = useState<PoolRow[]>([]);
   const [events, setEvents] = useState<EventRow[]>([]);
+  const [seasonQuestions, setSeasonQuestions] = useState<BonusQuestion[]>([]);
+  const [weekendQuestions, setWeekendQuestions] = useState<BonusQuestion[]>([]);
+
+  const seasonYear = 2026;
+
+  // selections
   const [selectedPoolId, setSelectedPoolId] = useState<string>("");
   const [selectedEventId, setSelectedEventId] = useState<string>("");
 
-  // Season
-  const [seasonYear, setSeasonYear] = useState<number>(2026);
-  const [seasonQuestions, setSeasonQuestions] = useState<BonusQuestionRow[]>([]);
+  // answers state
   const [seasonAnswers, setSeasonAnswers] = useState<Record<string, any>>({});
-
-  // Weekend
-  const [weekendQuestions, setWeekendQuestions] = useState<BonusQuestionRow[]>([]);
   const [weekendAnswers, setWeekendAnswers] = useState<Record<string, any>>({});
-  const [setId, setSetId] = useState<string>("");
 
-  useEffect(() => {
-    (async () => {
-      setLoading(true);
-      setMsg("");
+  const selectedPool = useMemo(
+    () => pools.find((p) => p.id === selectedPoolId) ?? null,
+    [pools, selectedPoolId]
+  );
+  const selectedEvent = useMemo(
+    () => events.find((e) => e.id === selectedEventId) ?? null,
+    [events, selectedEventId]
+  );
 
-      const { data: auth } = await supabase.auth.getUser();
-      const user = auth?.user;
-      if (!user) {
-        router.replace("/login");
-        return;
-      }
+  // ---- data loaders ----
 
-      setEmail(user.email ?? "");
+  async function requireAdmin() {
+    const { data } = await supabase.auth.getUser();
+    if (!data.user) {
+      router.replace("/login");
+      return null;
+    }
+    setUserEmail(data.user.email ?? null);
 
-      // Check admin
-      const { data: adminRow, error: adminErr } = await supabase
-        .from("app_admins")
-        .select("user_id")
-        .eq("user_id", user.id)
-        .maybeSingle();
-
-      if (adminErr || !adminRow) {
-        setIsAdmin(false);
-        setLoading(false);
-        return;
-      }
-
-      setIsAdmin(true);
-
-      // Load pools
-      const { data: poolsData, error: poolsErr } = await supabase
-        .from("pools")
-        .select("id,name")
-        .order("created_at", { ascending: false });
-
-      if (poolsErr) {
-        setMsg(poolsErr.message);
-        setLoading(false);
-        return;
-      }
-
-      setPools(poolsData ?? []);
-      const firstPool = poolsData?.[0]?.id ?? "";
-      setSelectedPoolId(firstPool);
-
-      // Load events
-      const { data: eventsData, error: eventsErr } = await supabase
-        .from("events")
-        .select("id,name,starts_at,weekend_type")
-        .order("starts_at", { ascending: true });
-
-      if (eventsErr) {
-        setMsg(eventsErr.message);
-        setLoading(false);
-        return;
-      }
-
-      setEvents(eventsData ?? []);
-      const firstEvent = eventsData?.[0]?.id ?? "";
-      setSelectedEventId(firstEvent);
-
-      // Load season questions
-      const { data: sQ, error: sQErr } = await supabase
-        .from("bonus_questions")
-        .select("id,prompt,answer_kind")
-        .eq("scope", "season")
-        .order("created_at", { ascending: true });
-
-      if (sQErr) {
-        setMsg(sQErr.message);
-        setLoading(false);
-        return;
-      }
-
-      setSeasonQuestions((sQ ?? []) as any);
-
-      // Load weekend bank (vraagbank)
-      const { data: wBank, error: wBankErr } = await supabase
-        .from("bonus_question_bank")
-        .select("id,prompt,answer_kind")
-        .order("created_at", { ascending: true });
-
-      if (wBankErr) {
-        setMsg(wBankErr.message);
-        setLoading(false);
-        return;
-      }
-
-      // let op: weekendQuestions worden later overschreven naar “alleen de 3 gekozen”
-      setWeekendQuestions((wBank ?? []) as any);
-
-      setLoading(false);
-    })();
-  }, [router, supabase]);
-
-  // -------- helpers ----------
-  function setSeasonValue(qid: string, v: any) {
-    setSeasonAnswers((prev) => ({ ...prev, [qid]: v }));
-  }
-  function setWeekendValue(qid: string, v: any) {
-    setWeekendAnswers((prev) => ({ ...prev, [qid]: v }));
-  }
-
-  async function ensureWeekendSet(poolId: string, eventId: string) {
-    // 1) bestaat set al?
-    const { data: existing, error: exErr } = await supabase
-      .from("pool_event_bonus_sets")
-      .select("id")
-      .eq("pool_id", poolId)
-      .eq("event_id", eventId)
+    const { data: profile, error } = await supabase
+      .from("profiles")
+      .select("is_app_admin")
+      .eq("id", data.user.id)
       .maybeSingle();
 
-    if (exErr) throw exErr;
-
-    let sid = existing?.id as string | undefined;
-
-    // 2) zo niet: create set
-    if (!sid) {
-      const { data: created, error: cErr } = await supabase
-        .from("pool_event_bonus_sets")
-        .insert({ pool_id: poolId, event_id: eventId })
-        .select("id")
-        .single();
-
-      if (cErr) throw cErr;
-      sid = created.id;
+    if (error || !profile?.is_app_admin) {
+      router.replace("/pools");
+      return null;
     }
 
-    // 3) haal vragen in set op
-    const { data: links, error: lErr } = await supabase
-      .from("pool_event_bonus_set_questions")
-      .select("question_id")
-      .eq("set_id", sid);
+    return data.user;
+  }
 
-    if (lErr) throw lErr;
+  async function loadPools() {
+    const { data, error } = await supabase.from("pools").select("id,name").order("name");
+    if (error) throw error;
+    setPools((data ?? []) as PoolRow[]);
+  }
 
-    // 4) als nog leeg: kies random 3 uit bank en insert links
-    let questionIds = (links ?? []).map((r: any) => r.question_id);
+  async function loadEvents() {
+    const { data, error } = await supabase
+      .from("events")
+      .select("id,name,starts_at,weekend_type")
+      .order("starts_at", { ascending: true });
+    if (error) throw error;
+    setEvents((data ?? []) as EventRow[]);
+  }
 
-    if (questionIds.length < 3) {
-      // load bank ids
-      const { data: bankRows, error: bErr } = await supabase
-        .from("bonus_question_bank")
-        .select("id")
-        .order("created_at", { ascending: true });
-
-      if (bErr) throw bErr;
-
-      const ids = (bankRows ?? []).map((r: any) => r.id);
-      // simple shuffle
-      for (let i = ids.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [ids[i], ids[j]] = [ids[j], ids[i]];
-      }
-      const picked = ids.slice(0, 3);
-
-      const inserts = picked.map((qid) => ({ set_id: sid, question_id: qid }));
-      const { error: insErr } = await supabase.from("pool_event_bonus_set_questions").insert(inserts);
-      if (insErr) throw insErr;
-
-      questionIds = picked;
-    }
-
-    // 5) haal question detail voor deze 3
-    const { data: qRows, error: qErr } = await supabase
+  async function loadQuestions() {
+    const { data, error } = await supabase
       .from("bonus_question_bank")
-      .select("id,prompt,answer_kind")
-      .in("id", questionIds);
+      .select("*")
+      .eq("active", true)
+      .order("scope")
+      .order("points", { ascending: false });
 
-    if (qErr) throw qErr;
+    if (error) throw error;
 
-    // behoud volgorde van questionIds
-    const byId = new Map((qRows ?? []).map((q: any) => [q.id, q]));
-    const ordered = questionIds.map((id) => byId.get(id)).filter(Boolean);
-
-    return { setId: sid!, questionIds, questions: ordered as BonusQuestionRow[] };
+    const all = (data ?? []) as BonusQuestion[];
+    setSeasonQuestions(all.filter((q) => q.scope === "season"));
+    setWeekendQuestions(all.filter((q) => q.scope === "weekend"));
   }
 
   async function loadSeasonOfficialAnswers() {
-    setMsg("");
     const { data, error } = await supabase
       .from("season_official_answers")
       .select("question_id,answer_json")
@@ -280,72 +112,110 @@ export default function AdminBonusPage() {
     if (error) throw error;
 
     const map: Record<string, any> = {};
-    (data ?? []).forEach((r: any) => (map[r.question_id] = r.answer_json?.value ?? null));
+    for (const row of data ?? []) {
+      map[row.question_id] = row.answer_json?.value ?? null;
+    }
     setSeasonAnswers(map);
   }
 
-  async function loadWeekendOfficialAnswers(poolId: string, eventId: string, sid: string, questionIds: string[]) {
-    setMsg("");
+  async function loadWeekendSetQuestionIds(poolId: string, eventId: string) {
+    // Set id (one set per pool+event)
+    const { data: setRow, error: setErr } = await supabase
+      .from("pool_event_bonus_sets")
+      .select("id")
+      .eq("pool_id", poolId)
+      .eq("event_id", eventId)
+      .maybeSingle();
 
-    // IMPORTANT: we lezen per set, zodat dezelfde vraag later weer kan zonder collision
+    if (setErr) throw setErr;
+    if (!setRow?.id) return { setId: null as string | null, questionIds: [] as string[] };
+
+    const setId = setRow.id as string;
+
+    // Which questions are in the set
+    const { data: qRows, error: qErr } = await supabase
+      .from("pool_event_bonus_set_questions")
+      .select("question_id")
+      .eq("set_id", setId);
+
+    if (qErr) throw qErr;
+
+    const questionIds = (qRows ?? []).map((r: any) => r.question_id as string);
+    return { setId, questionIds };
+  }
+
+  async function loadWeekendOfficialAnswersBySet(setId: string) {
     const { data, error } = await supabase
       .from("weekend_bonus_official_answers")
       .select("question_id,answer_json")
-      .eq("pool_id", poolId)
-      .eq("set_id", sid)
-      .in("question_id", questionIds);
+      .eq("set_id", setId);
 
     if (error) throw error;
 
     const map: Record<string, any> = {};
-    (data ?? []).forEach((r: any) => (map[r.question_id] = r.answer_json?.value ?? null));
-    setWeekendAnswers(map);
+    for (const row of data ?? []) {
+      map[row.question_id] = row.answer_json?.value ?? null;
+    }
+    return map;
   }
 
-  useEffect(() => {
-    if (!isAdmin || loading) return;
+  // ---- initial load ----
 
+  useEffect(() => {
     (async () => {
+      setLoading(true);
+      setMsg(null);
+
       try {
+        const u = await requireAdmin();
+        if (!u) return;
+
+        await Promise.all([loadPools(), loadEvents(), loadQuestions()]);
         await loadSeasonOfficialAnswers();
       } catch (e: any) {
-        setMsg(e?.message ?? "Load season official answers error");
+        setMsg(e?.message ?? "Load error");
+      } finally {
+        setLoading(false);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAdmin, loading, seasonYear]);
+  }, []);
 
+  // load weekend answers when pool+event changes
   useEffect(() => {
-    if (!isAdmin || loading) return;
-    if (tab !== "weekend") return;
-    if (!selectedPoolId || !selectedEventId) return;
-
     (async () => {
-      try {
-        const ensured = await ensureWeekendSet(selectedPoolId, selectedEventId);
-        setSetId(ensured.setId);
-        setWeekendQuestions(ensured.questions);
+      setMsg(null);
+      if (!selectedPoolId || !selectedEventId) {
+        setWeekendAnswers({});
+        return;
+      }
 
-        await loadWeekendOfficialAnswers(selectedPoolId, selectedEventId, ensured.setId, ensured.questionIds);
+      try {
+        const { setId } = await loadWeekendSetQuestionIds(selectedPoolId, selectedEventId);
+        if (!setId) {
+          setWeekendAnswers({});
+          return;
+        }
+
+        const wa = await loadWeekendOfficialAnswersBySet(setId);
+        setWeekendAnswers(wa);
       } catch (e: any) {
-        setMsg(e?.message ?? "Load weekend bonus error");
+        setMsg(e?.message ?? "Load weekend answers error");
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAdmin, loading, tab, selectedPoolId, selectedEventId]);
+  }, [selectedPoolId, selectedEventId]);
+
+  // ---- save handlers ----
 
   async function saveSeasonAll() {
-    setMsg("");
-    try {
-      const { data: auth } = await supabase.auth.getUser();
-      const user = auth?.user;
-      if (!user) throw new Error("Not logged in");
+    setMsg(null);
 
+    try {
       const rows = seasonQuestions.map((q) => ({
         season: seasonYear,
         question_id: q.id,
+        // Store { value: ... } so the client can compare consistently
         answer_json: { value: seasonAnswers[q.id] ?? null },
-        updated_by: user.id,
       }));
 
       const { error } = await supabase
@@ -354,25 +224,43 @@ export default function AdminBonusPage() {
 
       if (error) throw error;
 
-      setMsg("✅ Season official answers saved.");
+      setMsg("✅ Season bonus official answers saved.");
     } catch (e: any) {
       setMsg(e?.message ?? "Save season error");
     }
   }
 
   async function saveWeekendAll() {
-    setMsg("");
+    setMsg(null);
+
+    const { data: userData } = await supabase.auth.getUser();
+    const user = userData.user;
+    if (!user) {
+      setMsg("Not logged in.");
+      return;
+    }
+
     try {
-      const { data: auth } = await supabase.auth.getUser();
-      const user = auth?.user;
-      if (!user) throw new Error("Not logged in");
+      if (!selectedPoolId || !selectedEventId) {
+        setMsg("Select pool and event first.");
+        return;
+      }
 
-      if (!selectedPoolId) throw new Error("No pool selected");
-      if (!selectedEventId) throw new Error("No event selected");
-      if (!setId) throw new Error("No setId (set not generated)");
+      const { setId, questionIds } = await loadWeekendSetQuestionIds(
+        selectedPoolId,
+        selectedEventId
+      );
 
-      const questionIds = weekendQuestions.map((q) => q.id);
+      if (!setId) {
+        setMsg("No set_id for this pool/event. Generate a set first.");
+        return;
+      }
+      if (!questionIds.length) {
+        setMsg("No questions in this set.");
+        return;
+      }
 
+      // Save ONLY for the 3 questions in the set
       const rows = questionIds.map((qid) => ({
         pool_id: selectedPoolId,
         event_id: selectedEventId,
@@ -382,11 +270,11 @@ export default function AdminBonusPage() {
         decided_by: user.id,
       }));
 
-      // IMPORTANT:
-      // Dit vereist DB unique constraint: UNIQUE(pool_id, set_id, question_id)
+      // IMPORTANT: onConflict must match an existing UNIQUE constraint.
+      // In your DB you have UNIQUE(pool_id, event_id, question_id).
       const { error } = await supabase
-  .from("weekend_bonus_official_answers")
-  .upsert(rows, { onConflict: "pool_id,event_id,question_id" });
+        .from("weekend_bonus_official_answers")
+        .upsert(rows, { onConflict: "pool_id,event_id,question_id" });
 
       if (error) throw error;
 
@@ -401,258 +289,231 @@ export default function AdminBonusPage() {
     router.replace("/login");
   }
 
+  // ---- render helpers ----
+
+  function renderInput(
+    q: BonusQuestion,
+    value: any,
+    onChange: (v: any) => void
+  ) {
+    if (q.kind === "boolean") {
+      return (
+        <select
+          value={value === true ? "true" : value === false ? "false" : ""}
+          onChange={(e) => {
+            const v = e.target.value;
+            onChange(v === "true" ? true : v === "false" ? false : null);
+          }}
+        >
+          <option value="">(unset)</option>
+          <option value="true">Yes</option>
+          <option value="false">No</option>
+        </select>
+      );
+    }
+
+    if (q.kind === "number") {
+      return (
+        <input
+          type="number"
+          value={value ?? ""}
+          onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))}
+        />
+      );
+    }
+
+    if (q.kind === "choice") {
+      const choices = q.choices ?? [];
+      return (
+        <select
+          value={value ?? ""}
+          onChange={(e) => onChange(e.target.value === "" ? null : e.target.value)}
+        >
+          <option value="">(unset)</option>
+          {choices.map((c) => (
+            <option key={c} value={c}>
+              {c}
+            </option>
+          ))}
+        </select>
+      );
+    }
+
+    // text
+    return (
+      <input
+        type="text"
+        value={value ?? ""}
+        onChange={(e) => onChange(e.target.value === "" ? null : e.target.value)}
+      />
+    );
+  }
+
+  // ---- UI ----
+
   if (loading) {
     return (
-      <main style={{ padding: 16 }}>
-        <h1>Admin Bonus</h1>
-        <p>Loading…</p>
-      </main>
+      <div style={{ padding: 24 }}>
+        <div>Loading...</div>
+      </div>
     );
   }
 
-  if (!isAdmin) {
-    return (
-      <main style={{ padding: 16 }}>
-        <h1>Admin Bonus</h1>
-        <p>You are not an admin.</p>
-        <button onClick={() => router.replace("/pools")}>Back</button>
-      </main>
-    );
-  }
+  const weekendSetInfo = useMemo(() => {
+    if (!selectedPoolId || !selectedEventId) return null;
+    return { poolId: selectedPoolId, eventId: selectedEventId };
+  }, [selectedPoolId, selectedEventId]);
 
   return (
-    <main style={{ padding: 16 }}>
+    <div style={{ padding: 24, maxWidth: 980 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
         <div>
-          <div style={{ fontSize: 12, opacity: 0.7 }}>Logged in as: {email}</div>
-          <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
-            <button
-              onClick={() => setTab("season")}
-              style={{
-                padding: "8px 12px",
-                borderRadius: 999,
-                border: "1px solid #ddd",
-                background: tab === "season" ? "black" : "white",
-                color: tab === "season" ? "white" : "black",
-              }}
-            >
-              Season bonus
-            </button>
-            <button
-              onClick={() => setTab("weekend")}
-              style={{
-                padding: "8px 12px",
-                borderRadius: 999,
-                border: "1px solid #ddd",
-                background: tab === "weekend" ? "black" : "white",
-                color: tab === "weekend" ? "white" : "black",
-              }}
-            >
-              Weekend bonus
-            </button>
+          <div style={{ fontSize: 14, opacity: 0.8 }}>
+            Logged in as: {userEmail ?? "-"}
+          </div>
+
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button onClick={() => router.push("/admin/results")}>Back to Results</button>
+            <button onClick={logout}>Logout</button>
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-          <button onClick={() => router.replace("/admin/results")}>Back to Results</button>
-          <button onClick={logout}>Logout</button>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <button
+            onClick={saveSeasonAll}
+            style={{ padding: "8px 12px" }}
+          >
+            Save season answers
+          </button>
+          <button
+            onClick={saveWeekendAll}
+            style={{ padding: "8px 12px" }}
+            disabled={!selectedPoolId || !selectedEventId}
+          >
+            Save weekend answers
+          </button>
         </div>
       </div>
 
-      <h1 style={{ marginTop: 18 }}>
-        {tab === "season" ? "Season bonus official answers" : "Weekend bonus official answers"}
-      </h1>
+      <h1 style={{ marginTop: 18 }}>Weekend bonus official answers</h1>
 
-      {msg && <p style={{ color: msg.startsWith("✅") ? "green" : "crimson" }}>{msg}</p>}
-
-      {tab === "season" && (
-        <section style={{ marginTop: 14 }}>
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <label>
-              Season:&nbsp;
-              <input
-                type="number"
-                value={seasonYear}
-                onChange={(e) => setSeasonYear(Number(e.target.value))}
-                style={{ width: 90 }}
-              />
-            </label>
-            <button onClick={saveSeasonAll}>Save season answers</button>
-          </div>
-
-          <div style={{ marginTop: 18, display: "grid", gap: 14 }}>
-            {seasonQuestions.map((q) => (
-              <div key={q.id} style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
-                <div style={{ fontWeight: 700 }}>{q.prompt}</div>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>
-                  kind: {q.answer_kind} • id: {q.id}
-                </div>
-
-                {q.answer_kind === "boolean" ? (
-                  <select
-                    value={
-                      seasonAnswers[q.id] === true
-                        ? "true"
-                        : seasonAnswers[q.id] === false
-                        ? "false"
-                        : ""
-                    }
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setSeasonValue(q.id, v === "" ? null : v === "true");
-                    }}
-                    style={{ marginTop: 8, width: "100%", padding: 8 }}
-                  >
-                    <option value="">— Select —</option>
-                    <option value="true">Yes</option>
-                    <option value="false">No</option>
-                  </select>
-                ) : q.answer_kind === "driver" ? (
-                  <select
-                    value={seasonAnswers[q.id] ?? ""}
-                    onChange={(e) => setSeasonValue(q.id, normalizeCode(e.target.value))}
-                    style={{ marginTop: 8, width: "100%", padding: 8 }}
-                  >
-                    <option value="">— Select driver —</option>
-                    {F1_DRIVERS_2026.map((d) => (
-                      <option key={d.code} value={d.code}>
-                        {d.name} ({d.code}) — {d.teamName}
-                      </option>
-                    ))}
-                  </select>
-                ) : q.answer_kind === "team" ? (
-                  <select
-                    value={seasonAnswers[q.id] ?? ""}
-                    onChange={(e) => setSeasonValue(q.id, e.target.value)}
-                    style={{ marginTop: 8, width: "100%", padding: 8 }}
-                  >
-                    <option value="">— Select team —</option>
-                    {TEAM_OPTIONS.map((t) => (
-                      <option key={t.teamId} value={t.teamId}>
-                        {t.teamName}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    value={seasonAnswers[q.id] ?? ""}
-                    onChange={(e) => setSeasonValue(q.id, e.target.value)}
-                    style={{ marginTop: 8, width: "100%", padding: 8 }}
-                  />
-                )}
-              </div>
-            ))}
-          </div>
-        </section>
+      {msg && (
+        <div style={{ margin: "12px 0", color: msg.startsWith("✅") ? "green" : "crimson" }}>
+          {msg}
+        </div>
       )}
 
-      {tab === "weekend" && (
-        <section style={{ marginTop: 14 }}>
-          <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-            <label>
-              Pool:&nbsp;
-              <select
-                value={selectedPoolId}
-                onChange={(e) => setSelectedPoolId(e.target.value)}
-                style={{ minWidth: 340 }}
-              >
-                {pools.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              Event:&nbsp;
-              <select
-                value={selectedEventId}
-                onChange={(e) => setSelectedEventId(e.target.value)}
-                style={{ minWidth: 520 }}
-              >
-                {events.map((ev) => (
-                  <option key={ev.id} value={ev.id}>
-                    {ev.name} {ev.starts_at ? `(${ev.starts_at})` : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <button onClick={saveWeekendAll}>Save weekend answers</button>
+      <div style={{ display: "grid", gap: 12, marginTop: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: 8 }}>
+          <div>Pool:</div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <select
+              value={selectedPoolId}
+              onChange={(e) => setSelectedPoolId(e.target.value)}
+              style={{ width: "100%", padding: 8 }}
+            >
+              <option value="">Select pool</option>
+              {pools.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+            {selectedPool && (
+              <span style={{ fontSize: 12, opacity: 0.7 }}>({selectedPool.id})</span>
+            )}
           </div>
+        </div>
 
-          <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
-            Selected:{" "}
-            {events.find((e) => e.id === selectedEventId)?.name ?? "(none)"} •{" "}
-            {events.find((e) => e.id === selectedEventId)?.weekend_type ?? "standard"}
+        <div style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: 8 }}>
+          <div>Event:</div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <select
+              value={selectedEventId}
+              onChange={(e) => setSelectedEventId(e.target.value)}
+              style={{ width: "100%", padding: 8 }}
+            >
+              <option value="">Select event</option>
+              {events.map((ev) => (
+                <option key={ev.id} value={ev.id}>
+                  {ev.name} {ev.starts_at ? `(${ev.starts_at})` : ""}
+                </option>
+              ))}
+            </select>
+            {selectedEvent && (
+              <span style={{ fontSize: 12, opacity: 0.7 }}>({selectedEvent.id})</span>
+            )}
           </div>
+        </div>
+      </div>
 
-          <div style={{ marginTop: 18, display: "grid", gap: 14 }}>
-            {weekendQuestions.map((q) => (
-              <div key={q.id} style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
-                <div style={{ fontWeight: 700 }}>{q.prompt}</div>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>
-                  kind: {q.answer_kind} • id: {q.id}
+      {weekendSetInfo && (
+        <div style={{ marginTop: 16, opacity: 0.8, fontSize: 13 }}>
+          Selected: <b>{selectedEvent?.name ?? "-"}</b> • {selectedEvent?.weekend_type ?? "-"}
+        </div>
+      )}
+
+      <div style={{ marginTop: 20, display: "grid", gap: 14 }}>
+        {weekendQuestions
+          .filter((q) => true)
+          .map((q) => {
+            const v = weekendAnswers[q.id] ?? null;
+
+            return (
+              <div
+                key={q.id}
+                style={{
+                  border: "1px solid #ddd",
+                  borderRadius: 12,
+                  padding: 14,
+                }}
+              >
+                <div style={{ fontSize: 18, fontWeight: 700 }}>{q.question}</div>
+                <div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>
+                  kind: {q.kind} • id: {q.id}
                 </div>
 
-                {q.answer_kind === "boolean" ? (
-                  <select
-                    value={
-                      weekendAnswers[q.id] === true
-                        ? "true"
-                        : weekendAnswers[q.id] === false
-                        ? "false"
-                        : ""
-                    }
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setWeekendValue(q.id, v === "" ? null : v === "true");
-                    }}
-                    style={{ marginTop: 8, width: "100%", padding: 8 }}
-                  >
-                    <option value="">— Select —</option>
-                    <option value="true">Yes</option>
-                    <option value="false">No</option>
-                  </select>
-                ) : q.answer_kind === "driver" ? (
-                  <select
-                    value={weekendAnswers[q.id] ?? ""}
-                    onChange={(e) => setWeekendValue(q.id, normalizeCode(e.target.value))}
-                    style={{ marginTop: 8, width: "100%", padding: 8 }}
-                  >
-                    <option value="">— Select driver —</option>
-                    {F1_DRIVERS_2026.map((d) => (
-                      <option key={d.code} value={d.code}>
-                        {d.name} ({d.code}) — {d.teamName}
-                      </option>
-                    ))}
-                  </select>
-                ) : q.answer_kind === "team" ? (
-                  <select
-                    value={weekendAnswers[q.id] ?? ""}
-                    onChange={(e) => setWeekendValue(q.id, e.target.value)}
-                    style={{ marginTop: 8, width: "100%", padding: 8 }}
-                  >
-                    <option value="">— Select team —</option>
-                    {TEAM_OPTIONS.map((t) => (
-                      <option key={t.teamId} value={t.teamId}>
-                        {t.teamName}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    value={weekendAnswers[q.id] ?? ""}
-                    onChange={(e) => setWeekendValue(q.id, e.target.value)}
-                    style={{ marginTop: 8, width: "100%", padding: 8 }}
-                  />
+                <div style={{ marginTop: 10 }}>
+                  {renderInput(q, v, (nv) =>
+                    setWeekendAnswers((prev) => ({ ...prev, [q.id]: nv }))
+                  )}
+                </div>
+              </div>
+            );
+          })}
+      </div>
+
+      <hr style={{ margin: "28px 0" }} />
+
+      <h2>Season bonus official answers</h2>
+
+      <div style={{ marginTop: 20, display: "grid", gap: 14 }}>
+        {seasonQuestions.map((q) => {
+          const v = seasonAnswers[q.id] ?? null;
+
+          return (
+            <div
+              key={q.id}
+              style={{
+                border: "1px solid #ddd",
+                borderRadius: 12,
+                padding: 14,
+              }}
+            >
+              <div style={{ fontSize: 18, fontWeight: 700 }}>{q.question}</div>
+              <div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>
+                kind: {q.kind} • id: {q.id}
+              </div>
+
+              <div style={{ marginTop: 10 }}>
+                {renderInput(q, v, (nv) =>
+                  setSeasonAnswers((prev) => ({ ...prev, [q.id]: nv }))
                 )}
               </div>
-            ))}
-          </div>
-        </section>
-      )}
-    </main>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
