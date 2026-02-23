@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { supabase } from "../../../../lib/supabaseClient";
+import { createClient } from "@supabase/supabase-js";
 
 type PoolRow = { id: string; name: string };
 type EventRow = { id: string; name: string; starts_at: string | null; weekend_type?: string | null };
