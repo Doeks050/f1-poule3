@@ -9,12 +9,11 @@ type EventRow = { id: string; name: string; starts_at: string | null; weekend_ty
 
 type BonusQuestion = {
   id: string;
-  question: string;
-  kind: "boolean" | "number" | "text" | "choice";
-  choices?: string[] | null;
-  points: number;
-  active: boolean;
   scope: "season" | "weekend";
+  prompt: string;
+  answer_kind: string; // "boolean" | "number" | "text" | "choice" | "driver" | "team" | ...
+  options: any | null; // jsonb (voor choice/driver/team lists etc.)
+  is_active: boolean;
 };
 
 export default function AdminBonusPage() {
@@ -27,35 +26,37 @@ export default function AdminBonusPage() {
 
   const [pools, setPools] = useState<PoolRow[]>([]);
   const [events, setEvents] = useState<EventRow[]>([]);
+
   const [seasonQuestions, setSeasonQuestions] = useState<BonusQuestion[]>([]);
   const [weekendQuestions, setWeekendQuestions] = useState<BonusQuestion[]>([]);
 
-  const seasonYear = 2026;
-
-  // selections
   const [selectedPoolId, setSelectedPoolId] = useState<string>("");
   const [selectedEventId, setSelectedEventId] = useState<string>("");
 
-  // answers state
+  // season answers state (key: question_id => value)
   const [seasonAnswers, setSeasonAnswers] = useState<Record<string, any>>({});
+  // weekend answers state (key: question_id => value)
   const [weekendAnswers, setWeekendAnswers] = useState<Record<string, any>>({});
+
+  // optional cached info about weekend set
+  const [weekendSetInfo, setWeekendSetInfo] = useState<{
+    setId: string | null;
+    questionIds: string[];
+  } | null>(null);
+
+  const seasonYear = 2026;
 
   const selectedPool = useMemo(
     () => pools.find((p) => p.id === selectedPoolId) ?? null,
     [pools, selectedPoolId]
   );
+
   const selectedEvent = useMemo(
     () => events.find((e) => e.id === selectedEventId) ?? null,
     [events, selectedEventId]
   );
 
-  // NOTE: hooks must run before any conditional return (fix React error #310)
-  const weekendSetInfo = useMemo(() => {
-    if (!selectedPoolId || !selectedEventId) return null;
-    return { poolId: selectedPoolId, eventId: selectedEventId };
-  }, [selectedPoolId, selectedEventId]);
-
-  // ---- data loaders ----
+  // ---- auth/admin guard ----
 
   async function requireAdmin() {
     const { data } = await supabase.auth.getUser();
@@ -67,20 +68,23 @@ export default function AdminBonusPage() {
 
     setUserEmail(data.user.email ?? null);
 
-    // ✅ Admin check via app_admins (niet via profiles)
-    const { data: adminRow, error: adminErr } = await supabase
-      .from("app_admins")
-      .select("user_id")
+    // BELANGRIJK: jouw console gaf 400 bij `profiles?...&id=eq...`
+    // Dat wijst er meestal op dat `profiles.id` niet bestaat, maar `profiles.user_id` wel.
+    const { data: profile, error } = await supabase
+      .from("profiles")
+      .select("is_app_admin")
       .eq("user_id", data.user.id)
       .maybeSingle();
 
-    if (adminErr || !adminRow) {
+    if (error || !profile?.is_app_admin) {
       router.replace("/pools");
       return null;
     }
 
     return data.user;
   }
+
+  // ---- data loaders ----
 
   async function loadPools() {
     const { data, error } = await supabase.from("pools").select("id,name").order("name");
@@ -93,57 +97,39 @@ export default function AdminBonusPage() {
       .from("events")
       .select("id,name,starts_at,weekend_type")
       .order("starts_at", { ascending: true });
+
     if (error) throw error;
     setEvents((data ?? []) as EventRow[]);
-    setMsg(`Loaded events: ${(data ?? []).length}`);
   }
 
   async function loadQuestions() {
-  const { data, error } = await supabase
-    .from("bonus_question_bank")
-    .select("*"); // haal alles op, we normalizen client-side
+    // bonus_question_bank schema (volgens jouw screenshots):
+    // id, scope(text: 'season'|'weekend'), prompt, answer_kind(text), options(jsonb), is_active(bool)
+    const { data, error } = await supabase
+      .from("bonus_question_bank")
+      .select("id,scope,prompt,answer_kind,options,is_active")
+      .eq("is_active", true)
+      .order("created_at", { ascending: true });
 
-  if (error) throw error;
+    if (error) throw error;
 
-  // Normalize zodat we niet kapot gaan op null/andere kolomnamen
-  const allRaw = (data ?? []) as any[];
+    const all = (data ?? []) as any[];
 
-  const all: BonusQuestion[] = allRaw.map((r) => {
-    const active =
-      typeof r.active === "boolean"
-        ? r.active
-        : typeof r.is_active === "boolean"
-        ? r.is_active
-        : true; // default true als kolom ontbreekt
-
-    const scope =
-      (r.scope as "season" | "weekend" | undefined) ??
-      (r.question_scope as "season" | "weekend" | undefined) ??
-      "weekend"; // default weekend als null/ontbreekt
-
-    const kind =
-      (r.kind as BonusQuestion["kind"] | undefined) ??
-      (r.type as BonusQuestion["kind"] | undefined) ??
-      "text";
-
-    return {
+    const normalized: BonusQuestion[] = all.map((r) => ({
       id: String(r.id),
-      question: String(r.question ?? r.title ?? ""),
-      kind,
-      choices: (r.choices ?? r.options ?? null) as string[] | null,
-      points: Number(r.points ?? 0),
-      active,
-      scope,
-    };
-  });
+      scope: (r.scope === "season" ? "season" : "weekend") as "season" | "weekend",
+      prompt: String(r.prompt ?? ""),
+      answer_kind: String(r.answer_kind ?? "text"),
+      options: (r.options ?? null) as any,
+      is_active: Boolean(r.is_active),
+    }));
 
-  const activeOnly = all.filter((q) => q.active);
-
-  setSeasonQuestions(activeOnly.filter((q) => q.scope === "season"));
-  setWeekendQuestions(activeOnly.filter((q) => q.scope !== "season")); // alles wat niet season is -> weekend
-}
+    setSeasonQuestions(normalized.filter((q) => q.scope === "season"));
+    setWeekendQuestions(normalized.filter((q) => q.scope === "weekend"));
+  }
 
   async function loadSeasonOfficialAnswers() {
+    // season_official_answers: season, question_id, answer_json
     const { data, error } = await supabase
       .from("season_official_answers")
       .select("question_id,answer_json")
@@ -151,40 +137,36 @@ export default function AdminBonusPage() {
 
     if (error) throw error;
 
-    const map: Record<string, any> = {};
+    const next: Record<string, any> = {};
     for (const row of data ?? []) {
-      map[row.question_id] = row.answer_json?.value ?? null;
+      // support either {value: X} or raw
+      const aj: any = (row as any).answer_json;
+      next[(row as any).question_id] = aj?.value ?? aj ?? null;
     }
-    setSeasonAnswers(map);
+    setSeasonAnswers(next);
   }
 
   async function loadWeekendSetQuestionIds(poolId: string, eventId: string) {
-    // Set id (one set per pool+event)
-    const { data: setRow, error: setErr } = await supabase
-      .from("pool_event_bonus_sets")
-      .select("id")
+    // bonus_weekend_sets: pool_id, event_id, question_ids (uuid[])
+    const { data, error } = await supabase
+      .from("bonus_weekend_sets")
+      .select("id,question_ids")
       .eq("pool_id", poolId)
       .eq("event_id", eventId)
       .maybeSingle();
 
-    if (setErr) throw setErr;
-    if (!setRow?.id) return { setId: null as string | null, questionIds: [] as string[] };
+    if (error) throw error;
 
-    const setId = setRow.id as string;
+    const setId = data?.id ?? null;
+    const questionIds = (data?.question_ids ?? []) as string[];
 
-    // Which questions are in the set
-    const { data: qRows, error: qErr } = await supabase
-      .from("pool_event_bonus_set_questions")
-      .select("question_id")
-      .eq("set_id", setId);
+    setWeekendSetInfo({ setId, questionIds });
 
-    if (qErr) throw qErr;
-
-    const questionIds = (qRows ?? []).map((r: any) => r.question_id as string);
     return { setId, questionIds };
   }
 
   async function loadWeekendOfficialAnswersBySet(setId: string) {
+    // weekend_bonus_official_answers: pool_id, event_id, set_id, question_id, answer_json
     const { data, error } = await supabase
       .from("weekend_bonus_official_answers")
       .select("question_id,answer_json")
@@ -192,11 +174,12 @@ export default function AdminBonusPage() {
 
     if (error) throw error;
 
-    const map: Record<string, any> = {};
+    const next: Record<string, any> = {};
     for (const row of data ?? []) {
-      map[row.question_id] = row.answer_json?.value ?? null;
+      const aj: any = (row as any).answer_json;
+      next[(row as any).question_id] = aj?.value ?? aj ?? null;
     }
-    return map;
+    return next;
   }
 
   // ---- initial load ----
@@ -286,10 +269,7 @@ export default function AdminBonusPage() {
         return;
       }
 
-      const { setId, questionIds } = await loadWeekendSetQuestionIds(
-        selectedPoolId,
-        selectedEventId
-      );
+      const { setId, questionIds } = await loadWeekendSetQuestionIds(selectedPoolId, selectedEventId);
 
       if (!setId) {
         setMsg("No set_id for this pool/event. Generate a set first.");
@@ -332,7 +312,9 @@ export default function AdminBonusPage() {
   // ---- render helpers ----
 
   function renderInput(q: BonusQuestion, value: any, onChange: (v: any) => void) {
-    if (q.kind === "boolean") {
+    const kind = (q.answer_kind ?? "text").toLowerCase();
+
+    if (kind === "boolean") {
       return (
         <select
           value={value === true ? "true" : value === false ? "false" : ""}
@@ -348,7 +330,7 @@ export default function AdminBonusPage() {
       );
     }
 
-    if (q.kind === "number") {
+    if (kind === "number") {
       return (
         <input
           type="number"
@@ -358,13 +340,22 @@ export default function AdminBonusPage() {
       );
     }
 
-    if (q.kind === "choice") {
-      const choices = q.choices ?? [];
+    // choices can be stored as:
+    // - options: ["A","B"]
+    // - options: { choices: [...] }
+    // - options: { items: [...] } (drivers/teams later)
+    const raw = q.options as any;
+    const choices: string[] = Array.isArray(raw)
+      ? raw.map(String)
+      : Array.isArray(raw?.choices)
+      ? raw.choices.map(String)
+      : Array.isArray(raw?.items)
+      ? raw.items.map(String)
+      : [];
+
+    if (kind === "choice" || (choices.length > 0 && kind !== "text" && kind !== "driver" && kind !== "team")) {
       return (
-        <select
-          value={value ?? ""}
-          onChange={(e) => onChange(e.target.value === "" ? null : e.target.value)}
-        >
+        <select value={value ?? ""} onChange={(e) => onChange(e.target.value === "" ? null : e.target.value)}>
           <option value="">(unset)</option>
           {choices.map((c) => (
             <option key={c} value={c}>
@@ -375,7 +366,7 @@ export default function AdminBonusPage() {
       );
     }
 
-    // text
+    // For now: driver/team/text => free text input.
     return (
       <input
         type="text"
@@ -445,9 +436,7 @@ export default function AdminBonusPage() {
                 </option>
               ))}
             </select>
-            {selectedPool && (
-              <span style={{ fontSize: 12, opacity: 0.7 }}>({selectedPool.id})</span>
-            )}
+            {selectedPool && <span style={{ fontSize: 12, opacity: 0.7 }}>({selectedPool.id})</span>}
           </div>
         </div>
 
@@ -466,9 +455,7 @@ export default function AdminBonusPage() {
                 </option>
               ))}
             </select>
-            {selectedEvent && (
-              <span style={{ fontSize: 12, opacity: 0.7 }}>({selectedEvent.id})</span>
-            )}
+            {selectedEvent && <span style={{ fontSize: 12, opacity: 0.7 }}>({selectedEvent.id})</span>}
           </div>
         </div>
       </div>
@@ -480,31 +467,29 @@ export default function AdminBonusPage() {
       )}
 
       <div style={{ marginTop: 20, display: "grid", gap: 14 }}>
-        {weekendQuestions
-          .filter((q) => true)
-          .map((q) => {
-            const v = weekendAnswers[q.id] ?? null;
+        {weekendQuestions.map((q) => {
+          const v = weekendAnswers[q.id] ?? null;
 
-            return (
-              <div
-                key={q.id}
-                style={{
-                  border: "1px solid #ddd",
-                  borderRadius: 12,
-                  padding: 14,
-                }}
-              >
-                <div style={{ fontSize: 18, fontWeight: 700 }}>{q.question}</div>
-                <div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>
-                  kind: {q.kind} • id: {q.id}
-                </div>
-
-                <div style={{ marginTop: 10 }}>
-                  {renderInput(q, v, (nv) => setWeekendAnswers((prev) => ({ ...prev, [q.id]: nv })))}
-                </div>
+          return (
+            <div
+              key={q.id}
+              style={{
+                border: "1px solid #ddd",
+                borderRadius: 12,
+                padding: 14,
+              }}
+            >
+              <div style={{ fontSize: 18, fontWeight: 700 }}>{q.prompt}</div>
+              <div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>
+                kind: {q.answer_kind} • id: {q.id}
               </div>
-            );
-          })}
+
+              <div style={{ marginTop: 10 }}>
+                {renderInput(q, v, (nv) => setWeekendAnswers((prev) => ({ ...prev, [q.id]: nv })))}
+              </div>
+            </div>
+          );
+        })}
       </div>
 
       <hr style={{ margin: "28px 0" }} />
@@ -524,9 +509,9 @@ export default function AdminBonusPage() {
                 padding: 14,
               }}
             >
-              <div style={{ fontSize: 18, fontWeight: 700 }}>{q.question}</div>
+              <div style={{ fontSize: 18, fontWeight: 700 }}>{q.prompt}</div>
               <div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>
-                kind: {q.kind} • id: {q.id}
+                kind: {q.answer_kind} • id: {q.id}
               </div>
 
               <div style={{ marginTop: 10 }}>
