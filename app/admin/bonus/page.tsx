@@ -365,7 +365,7 @@ export default function AdminBonusPage() {
 
       const { error } = await supabase
         .from("weekend_bonus_official_answers")
-        .upsert(rows, { onConflict: "set_id,question_id" });
+        .upsert(rows, { onConflict: "pool_id,set_id,question_id" })
 
       if (error) throw error;
 
