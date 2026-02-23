@@ -95,6 +95,7 @@ export default function AdminBonusPage() {
       .order("starts_at", { ascending: true });
     if (error) throw error;
     setEvents((data ?? []) as EventRow[]);
+    setMsg(`Loaded events: ${(data ?? []).length}`);
   }
 
   async function loadQuestions() {
