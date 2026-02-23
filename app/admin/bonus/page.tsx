@@ -52,26 +52,29 @@ export default function AdminBonusPage() {
   // ---- data loaders ----
 
   async function requireAdmin() {
-    const { data } = await supabase.auth.getUser();
-    if (!data.user) {
-      router.replace("/login");
-      return null;
-    }
-    setUserEmail(data.user.email ?? null);
+  const { data } = await supabase.auth.getUser();
 
-    const { data: profile, error } = await supabase
-      .from("profiles")
-      .select("is_app_admin")
-      .eq("id", data.user.id)
-      .maybeSingle();
-
-    if (error || !profile?.is_app_admin) {
-      router.replace("/pools");
-      return null;
-    }
-
-    return data.user;
+  if (!data.user) {
+    router.replace("/login");
+    return null;
   }
+
+  setUserEmail(data.user.email ?? null);
+
+  // ✅ Admin check via app_admins (niet via profiles)
+  const { data: adminRow, error: adminErr } = await supabase
+    .from("app_admins")
+    .select("user_id")
+    .eq("user_id", data.user.id)
+    .maybeSingle();
+
+  if (adminErr || !adminRow) {
+    router.replace("/pools");
+    return null;
+  }
+
+  return data.user;
+}
 
   async function loadPools() {
     const { data, error } = await supabase.from("pools").select("id,name").order("name");
