@@ -1,5 +1,3 @@
-"use client";
-
 // app/api/bonus/weekend-answers/route.ts
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
