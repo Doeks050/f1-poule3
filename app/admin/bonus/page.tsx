@@ -2,322 +2,350 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { supabase } from "../../../lib/supabaseClient";
-import { F1_DRIVERS_2026 } from "../../../lib/f1_2026";
+import { createClient } from "@supabase/supabase-js";
+
+// ---- Hardcoded lists (zoals je al had) ----
+const F1_DRIVERS_2026 = [
+  { code: "VER", name: "Max Verstappen", teamName: "Red Bull" },
+  { code: "PER", name: "Sergio Pérez", teamName: "Red Bull" },
+  { code: "LEC", name: "Charles Leclerc", teamName: "Ferrari" },
+  { code: "HAM", name: "Lewis Hamilton", teamName: "Ferrari" },
+  { code: "NOR", name: "Lando Norris", teamName: "McLaren" },
+  { code: "PIA", name: "Oscar Piastri", teamName: "McLaren" },
+  { code: "RUS", name: "George Russell", teamName: "Mercedes" },
+  { code: "ANT", name: "Andrea Kimi Antonelli", teamName: "Mercedes" },
+  { code: "ALO", name: "Fernando Alonso", teamName: "Aston Martin" },
+  { code: "STR", name: "Lance Stroll", teamName: "Aston Martin" },
+  { code: "SAI", name: "Carlos Sainz", teamName: "Williams" },
+  { code: "ALB", name: "Alex Albon", teamName: "Williams" },
+  { code: "OCO", name: "Esteban Ocon", teamName: "Haas" },
+  { code: "BEA", name: "Oliver Bearman", teamName: "Haas" },
+  { code: "GAS", name: "Pierre Gasly", teamName: "Alpine" },
+  { code: "DOO", name: "Jack Doohan", teamName: "Alpine" },
+  { code: "TSU", name: "Yuki Tsunoda", teamName: "Racing Bulls" },
+  { code: "LAW", name: "Liam Lawson", teamName: "Racing Bulls" },
+  { code: "BOT", name: "Valtteri Bottas", teamName: "Sauber" },
+  { code: "ZHO", name: "Guanyu Zhou", teamName: "Sauber" },
+  { code: "CAD1", name: "Cadillac Driver 1", teamName: "Cadillac" },
+  { code: "CAD2", name: "Cadillac Driver 2", teamName: "Cadillac" },
+  { code: "AUD1", name: "Audi Driver 1", teamName: "Audi" },
+  { code: "AUD2", name: "Audi Driver 2", teamName: "Audi" },
+];
+
+const TEAM_OPTIONS = [
+  { teamId: "red_bull", teamName: "Red Bull" },
+  { teamId: "ferrari", teamName: "Ferrari" },
+  { teamId: "mclaren", teamName: "McLaren" },
+  { teamId: "mercedes", teamName: "Mercedes" },
+  { teamId: "aston_martin", teamName: "Aston Martin" },
+  { teamId: "williams", teamName: "Williams" },
+  { teamId: "alpine", teamName: "Alpine" },
+  { teamId: "haas", teamName: "Haas" },
+  { teamId: "racing_bulls", teamName: "Racing Bulls" },
+  { teamId: "sauber", teamName: "Sauber" },
+  { teamId: "cadillac", teamName: "Cadillac" },
+  { teamId: "audi", teamName: "Audi" },
+];
+
+type PoolRow = { id: string; name: string };
+type EventRow = { id: string; name: string; starts_at: string | null; weekend_type: string | null };
 
 type BonusQuestionRow = {
   id: string;
-  scope: "season" | "weekend";
   prompt: string;
-  answer_kind: "boolean" | "text" | "number" | "driver" | "team";
-  is_active: boolean;
+  answer_kind: "boolean" | "driver" | "team" | "text";
 };
 
-type EventRow = {
-  id: string;
-  name: string;
-  starts_at: string | null;
-  format?: string | null;
-};
-
-type PoolRow = {
-  id: string;
-  name: string | null;
-};
-
-function normalizeCode(v: string) {
-  return (v ?? "").trim().toUpperCase();
+function normalizeCode(s: string) {
+  return (s ?? "").trim().toUpperCase();
 }
-
-function uniqBy<T>(arr: T[], keyFn: (t: T) => string) {
-  const seen = new Set<string>();
-  const out: T[] = [];
-  for (const x of arr) {
-    const k = keyFn(x);
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(x);
-  }
-  return out;
-}
-
-const TEAM_OPTIONS = uniqBy(
-  F1_DRIVERS_2026.map((d) => ({ teamId: d.teamId, teamName: d.teamName })),
-  (t) => t.teamId
-).sort((a, b) => a.teamName.localeCompare(b.teamName));
 
 export default function AdminBonusPage() {
   const router = useRouter();
 
+  const supabase = useMemo(() => {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+    const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+    return createClient(url, anon);
+  }, []);
+
   const [loading, setLoading] = useState(true);
-  const [msg, setMsg] = useState<string | null>(null);
-
   const [isAdmin, setIsAdmin] = useState(false);
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState<string>("");
 
-  const [tab, setTab] = useState<"season" | "weekend">("season");
+  const [tab, setTab] = useState<"season" | "weekend">("weekend");
+  const [msg, setMsg] = useState<string>("");
+
+  // Pools + events
+  const [pools, setPools] = useState<PoolRow[]>([]);
+  const [events, setEvents] = useState<EventRow[]>([]);
+  const [selectedPoolId, setSelectedPoolId] = useState<string>("");
+  const [selectedEventId, setSelectedEventId] = useState<string>("");
 
   // Season
   const [seasonYear, setSeasonYear] = useState<number>(2026);
   const [seasonQuestions, setSeasonQuestions] = useState<BonusQuestionRow[]>([]);
-  const [seasonAnswers, setSeasonAnswers] = useState<Record<string, any>>({}); // question_id -> answer_json.value
+  const [seasonAnswers, setSeasonAnswers] = useState<Record<string, any>>({});
 
   // Weekend
-  const [pools, setPools] = useState<PoolRow[]>([]);
-  const [selectedPoolId, setSelectedPoolId] = useState<string>("");
-
-  const [events, setEvents] = useState<EventRow[]>([]);
-  const [selectedEventId, setSelectedEventId] = useState<string>("");
-
   const [weekendQuestions, setWeekendQuestions] = useState<BonusQuestionRow[]>([]);
-  const [weekendAnswers, setWeekendAnswers] = useState<Record<string, any>>({}); // question_id -> answer_json.value
+  const [weekendAnswers, setWeekendAnswers] = useState<Record<string, any>>({});
+  const [setId, setSetId] = useState<string>("");
 
-  const selectedEvent = useMemo(
-    () => events.find((e) => e.id === selectedEventId) ?? null,
-    [events, selectedEventId]
-  );
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      setMsg("");
 
-  const selectedPool = useMemo(
-    () => pools.find((p) => p.id === selectedPoolId) ?? null,
-    [pools, selectedPoolId]
-  );
+      const { data: auth } = await supabase.auth.getUser();
+      const user = auth?.user;
+      if (!user) {
+        router.replace("/login");
+        return;
+      }
 
-  async function requireAdmin() {
-    setLoading(true);
-    setMsg(null);
+      setEmail(user.email ?? "");
 
-    const { data: userData } = await supabase.auth.getUser();
-    const user = userData.user;
+      // Check admin
+      const { data: adminRow, error: adminErr } = await supabase
+        .from("app_admins")
+        .select("user_id")
+        .eq("user_id", user.id)
+        .maybeSingle();
 
-    if (!user) {
-      router.replace("/login");
-      return { ok: false };
-    }
+      if (adminErr || !adminRow) {
+        setIsAdmin(false);
+        setLoading(false);
+        return;
+      }
 
-    setEmail(user.email ?? "");
+      setIsAdmin(true);
 
-    const { data: adminRow, error: adminErr } = await supabase
-      .from("app_admins")
-      .select("user_id")
-      .eq("user_id", user.id)
-      .maybeSingle();
+      // Load pools
+      const { data: poolsData, error: poolsErr } = await supabase
+        .from("pools")
+        .select("id,name")
+        .order("created_at", { ascending: false });
 
-    if (adminErr) {
-      setMsg("Admin-check error: " + adminErr.message);
-      setIsAdmin(false);
+      if (poolsErr) {
+        setMsg(poolsErr.message);
+        setLoading(false);
+        return;
+      }
+
+      setPools(poolsData ?? []);
+      const firstPool = poolsData?.[0]?.id ?? "";
+      setSelectedPoolId(firstPool);
+
+      // Load events
+      const { data: eventsData, error: eventsErr } = await supabase
+        .from("events")
+        .select("id,name,starts_at,weekend_type")
+        .order("starts_at", { ascending: true });
+
+      if (eventsErr) {
+        setMsg(eventsErr.message);
+        setLoading(false);
+        return;
+      }
+
+      setEvents(eventsData ?? []);
+      const firstEvent = eventsData?.[0]?.id ?? "";
+      setSelectedEventId(firstEvent);
+
+      // Load season questions
+      const { data: sQ, error: sQErr } = await supabase
+        .from("bonus_questions")
+        .select("id,prompt,answer_kind")
+        .eq("scope", "season")
+        .order("created_at", { ascending: true });
+
+      if (sQErr) {
+        setMsg(sQErr.message);
+        setLoading(false);
+        return;
+      }
+
+      setSeasonQuestions((sQ ?? []) as any);
+
+      // Load weekend bank (vraagbank)
+      const { data: wBank, error: wBankErr } = await supabase
+        .from("bonus_question_bank")
+        .select("id,prompt,answer_kind")
+        .order("created_at", { ascending: true });
+
+      if (wBankErr) {
+        setMsg(wBankErr.message);
+        setLoading(false);
+        return;
+      }
+
+      // let op: weekendQuestions worden later overschreven naar “alleen de 3 gekozen”
+      setWeekendQuestions((wBank ?? []) as any);
+
       setLoading(false);
-      return { ok: false };
-    }
+    })();
+  }, [router, supabase]);
 
-    if (!adminRow) {
-      setIsAdmin(false);
-      setLoading(false);
-      return { ok: false };
-    }
-
-    setIsAdmin(true);
-    setLoading(false);
-    return { ok: true, userId: user.id };
+  // -------- helpers ----------
+  function setSeasonValue(qid: string, v: any) {
+    setSeasonAnswers((prev) => ({ ...prev, [qid]: v }));
+  }
+  function setWeekendValue(qid: string, v: any) {
+    setWeekendAnswers((prev) => ({ ...prev, [qid]: v }));
   }
 
-  async function loadQuestions(scope: "season" | "weekend") {
-    const { data, error } = await supabase
-      .from("bonus_question_bank")
-      .select("id,scope,prompt,answer_kind,is_active")
-      .eq("scope", scope)
-      .eq("is_active", true)
-      .order("prompt", { ascending: true });
-
-    if (error) throw error;
-    return (data ?? []) as BonusQuestionRow[];
-  }
-
-  async function loadEvents() {
-    const { data, error } = await supabase
-      .from("events")
-      .select("id,name,starts_at,format")
-      .order("starts_at", { ascending: true });
-
-    if (error) throw error;
-    return (data ?? []) as EventRow[];
-  }
-
-  async function loadPools() {
-    const { data, error } = await supabase.from("pools").select("id,name").order("name");
-    if (error) throw error;
-    return (data ?? []) as PoolRow[];
-  }
-
-  async function loadSeasonAnswers(year: number) {
-    const { data, error } = await supabase
-      .from("season_official_answers")
-      .select("season,question_id,answer_json")
-      .eq("season", year);
-
-    if (error) throw error;
-
-    const map: Record<string, any> = {};
-    for (const row of data ?? []) {
-      map[row.question_id] = row.answer_json?.value ?? null;
-    }
-    return map;
-  }
-
-  // ✅ set-based: haal set_id + 3 question_ids voor (pool,event)
-  async function loadWeekendSetQuestionIds(poolId: string, eventId: string) {
-    const { data: setRow, error: setErr } = await supabase
+  async function ensureWeekendSet(poolId: string, eventId: string) {
+    // 1) bestaat set al?
+    const { data: existing, error: exErr } = await supabase
       .from("pool_event_bonus_sets")
       .select("id")
       .eq("pool_id", poolId)
       .eq("event_id", eventId)
       .maybeSingle();
 
-    if (setErr) throw setErr;
-    if (!setRow?.id) return { setId: null as string | null, questionIds: [] as string[] };
+    if (exErr) throw exErr;
 
-    const setId = setRow.id as string;
+    let sid = existing?.id as string | undefined;
 
-    const { data: setQs, error: setQsErr } = await supabase
+    // 2) zo niet: create set
+    if (!sid) {
+      const { data: created, error: cErr } = await supabase
+        .from("pool_event_bonus_sets")
+        .insert({ pool_id: poolId, event_id: eventId })
+        .select("id")
+        .single();
+
+      if (cErr) throw cErr;
+      sid = created.id;
+    }
+
+    // 3) haal vragen in set op
+    const { data: links, error: lErr } = await supabase
       .from("pool_event_bonus_set_questions")
-      .select("question_id,position")
-      .eq("set_id", setId)
-      .order("position", { ascending: true });
+      .select("question_id")
+      .eq("set_id", sid);
 
-    if (setQsErr) throw setQsErr;
+    if (lErr) throw lErr;
 
-    const questionIds = (setQs ?? [])
-      .map((r: any) => r.question_id as string)
-      .filter(Boolean)
-      .slice(0, 3);
+    // 4) als nog leeg: kies random 3 uit bank en insert links
+    let questionIds = (links ?? []).map((r: any) => r.question_id);
 
-    return { setId, questionIds };
-  }
+    if (questionIds.length < 3) {
+      // load bank ids
+      const { data: bankRows, error: bErr } = await supabase
+        .from("bonus_question_bank")
+        .select("id")
+        .order("created_at", { ascending: true });
 
-  // ✅ laad alleen de 3 vragen uit de bank (in juiste volgorde)
-  async function loadWeekendQuestionsForSet(questionIds: string[]) {
-    if (questionIds.length === 0) return [] as BonusQuestionRow[];
+      if (bErr) throw bErr;
 
-    const { data, error } = await supabase
+      const ids = (bankRows ?? []).map((r: any) => r.id);
+      // simple shuffle
+      for (let i = ids.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [ids[i], ids[j]] = [ids[j], ids[i]];
+      }
+      const picked = ids.slice(0, 3);
+
+      const inserts = picked.map((qid) => ({ set_id: sid, question_id: qid }));
+      const { error: insErr } = await supabase.from("pool_event_bonus_set_questions").insert(inserts);
+      if (insErr) throw insErr;
+
+      questionIds = picked;
+    }
+
+    // 5) haal question detail voor deze 3
+    const { data: qRows, error: qErr } = await supabase
       .from("bonus_question_bank")
-      .select("id,scope,prompt,answer_kind,is_active")
+      .select("id,prompt,answer_kind")
       .in("id", questionIds);
 
-    if (error) throw error;
+    if (qErr) throw qErr;
 
-    const rows = (data ?? []) as BonusQuestionRow[];
-    const byId: Record<string, BonusQuestionRow> = {};
-    for (const r of rows) byId[r.id] = r;
+    // behoud volgorde van questionIds
+    const byId = new Map((qRows ?? []).map((q: any) => [q.id, q]));
+    const ordered = questionIds.map((id) => byId.get(id)).filter(Boolean);
 
-    return questionIds.map((id) => byId[id]).filter(Boolean);
+    return { setId: sid!, questionIds, questions: ordered as BonusQuestionRow[] };
   }
 
-  // ✅ official answers per set (niet per event)
-  async function loadWeekendOfficialAnswersBySet(setId: string) {
+  async function loadSeasonOfficialAnswers() {
+    setMsg("");
     const { data, error } = await supabase
-      .from("weekend_bonus_official_answers")
-      .select("set_id,question_id,answer_json")
-      .eq("set_id", setId);
+      .from("season_official_answers")
+      .select("question_id,answer_json")
+      .eq("season", seasonYear);
 
     if (error) throw error;
 
     const map: Record<string, any> = {};
-    for (const row of data ?? []) {
-      map[row.question_id] = row.answer_json?.value ?? null;
-    }
-    return map;
+    (data ?? []).forEach((r: any) => (map[r.question_id] = r.answer_json?.value ?? null));
+    setSeasonAnswers(map);
   }
 
-  async function init() {
-    const res = await requireAdmin();
-    if (!res.ok) return;
+  async function loadWeekendOfficialAnswers(poolId: string, eventId: string, sid: string, questionIds: string[]) {
+    setMsg("");
 
-    try {
-      const [sQ, ev, pls] = await Promise.all([loadQuestions("season"), loadEvents(), loadPools()]);
+    // IMPORTANT: we lezen per set, zodat dezelfde vraag later weer kan zonder collision
+    const { data, error } = await supabase
+      .from("weekend_bonus_official_answers")
+      .select("question_id,answer_json")
+      .eq("pool_id", poolId)
+      .eq("set_id", sid)
+      .in("question_id", questionIds);
 
-      setSeasonQuestions(sQ);
-      setEvents(ev);
-      setPools(pls);
+    if (error) throw error;
 
-      if (pls.length > 0) setSelectedPoolId(pls[0].id);
-      if (ev.length > 0) setSelectedEventId(ev[0].id);
-
-      const sa = await loadSeasonAnswers(seasonYear);
-      setSeasonAnswers(sa);
-    } catch (e: any) {
-      setMsg(e?.message ?? "Load error");
-    }
+    const map: Record<string, any> = {};
+    (data ?? []).forEach((r: any) => (map[r.question_id] = r.answer_json?.value ?? null));
+    setWeekendAnswers(map);
   }
 
   useEffect(() => {
-    init();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!isAdmin || loading) return;
 
-  useEffect(() => {
     (async () => {
-      if (!isAdmin) return;
       try {
-        setMsg(null);
-        const sa = await loadSeasonAnswers(seasonYear);
-        setSeasonAnswers(sa);
+        await loadSeasonOfficialAnswers();
       } catch (e: any) {
-        setMsg(e?.message ?? "Load season answers error");
+        setMsg(e?.message ?? "Load season official answers error");
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [seasonYear, isAdmin]);
+  }, [isAdmin, loading, seasonYear]);
 
   useEffect(() => {
+    if (!isAdmin || loading) return;
+    if (tab !== "weekend") return;
+    if (!selectedPoolId || !selectedEventId) return;
+
     (async () => {
-      if (!isAdmin) return;
-      if (!selectedPoolId || !selectedEventId) return;
-
       try {
-        setMsg(null);
+        const ensured = await ensureWeekendSet(selectedPoolId, selectedEventId);
+        setSetId(ensured.setId);
+        setWeekendQuestions(ensured.questions);
 
-        const { setId, questionIds } = await loadWeekendSetQuestionIds(
-          selectedPoolId,
-          selectedEventId
-        );
-
-        if (!setId) {
-          setWeekendQuestions([]);
-          setWeekendAnswers({});
-          setMsg("No weekend bonus set found for this pool + event.");
-          return;
-        }
-
-        const qs = await loadWeekendQuestionsForSet(questionIds);
-        setWeekendQuestions(qs);
-
-        const wa = await loadWeekendOfficialAnswersBySet(setId);
-        setWeekendAnswers(wa);
+        await loadWeekendOfficialAnswers(selectedPoolId, selectedEventId, ensured.setId, ensured.questionIds);
       } catch (e: any) {
         setMsg(e?.message ?? "Load weekend bonus error");
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPoolId, selectedEventId, isAdmin]);
-
-  function setSeasonValue(questionId: string, value: any) {
-    setSeasonAnswers((prev) => ({ ...prev, [questionId]: value }));
-  }
-
-  function setWeekendValue(questionId: string, value: any) {
-    setWeekendAnswers((prev) => ({ ...prev, [questionId]: value }));
-  }
+  }, [isAdmin, loading, tab, selectedPoolId, selectedEventId]);
 
   async function saveSeasonAll() {
-    setMsg(null);
-    const { data: userData } = await supabase.auth.getUser();
-    const user = userData.user;
-
+    setMsg("");
     try {
+      const { data: auth } = await supabase.auth.getUser();
+      const user = auth?.user;
+      if (!user) throw new Error("Not logged in");
+
       const rows = seasonQuestions.map((q) => ({
         season: seasonYear,
         question_id: q.id,
         answer_json: { value: seasonAnswers[q.id] ?? null },
-        updated_by: user?.id ?? null,
+        updated_by: user.id,
       }));
 
       const { error } = await supabase
@@ -326,34 +354,25 @@ export default function AdminBonusPage() {
 
       if (error) throw error;
 
-      setMsg("✅ Season bonus answers saved.");
+      setMsg("✅ Season official answers saved.");
     } catch (e: any) {
       setMsg(e?.message ?? "Save season error");
     }
   }
 
-  // ✅ FIXED: Save weekend official answers per set_id + question_id (geen season kolom!)
   async function saveWeekendAll() {
-    setMsg(null);
-    if (!selectedPoolId) return setMsg("Select a pool first.");
-    if (!selectedEventId) return setMsg("Select an event first.");
-
+    setMsg("");
     try {
-      // decided_by is NOT NULL in weekend_bonus_official_answers
-      const { data: userData, error: userErr } = await supabase.auth.getUser();
-      if (userErr) throw userErr;
-      const user = userData.user;
-      if (!user) return setMsg("Not logged in.");
+      const { data: auth } = await supabase.auth.getUser();
+      const user = auth?.user;
+      if (!user) throw new Error("Not logged in");
 
-      const { setId, questionIds } = await loadWeekendSetQuestionIds(
-        selectedPoolId,
-        selectedEventId
-      );
+      if (!selectedPoolId) throw new Error("No pool selected");
+      if (!selectedEventId) throw new Error("No event selected");
+      if (!setId) throw new Error("No setId (set not generated)");
 
-      if (!setId) return setMsg("No weekend bonus set found for this pool + event.");
-      if (questionIds.length === 0) return setMsg("No questions configured for this set.");
+      const questionIds = weekendQuestions.map((q) => q.id);
 
-      // Alleen opslaan voor de 3 vragen in de set
       const rows = questionIds.map((qid) => ({
         pool_id: selectedPoolId,
         event_id: selectedEventId,
@@ -363,9 +382,11 @@ export default function AdminBonusPage() {
         decided_by: user.id,
       }));
 
+      // IMPORTANT:
+      // Dit vereist DB unique constraint: UNIQUE(pool_id, set_id, question_id)
       const { error } = await supabase
         .from("weekend_bonus_official_answers")
-        .upsert(rows, { onConflict: "pool_id,set_id,question_id" })
+        .upsert(rows, { onConflict: "pool_id,set_id,question_id" });
 
       if (error) throw error;
 
@@ -463,7 +484,9 @@ export default function AdminBonusPage() {
             {seasonQuestions.map((q) => (
               <div key={q.id} style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
                 <div style={{ fontWeight: 700 }}>{q.prompt}</div>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>kind: {q.answer_kind} • id: {q.id}</div>
+                <div style={{ fontSize: 12, opacity: 0.7 }}>
+                  kind: {q.answer_kind} • id: {q.id}
+                </div>
 
                 {q.answer_kind === "boolean" ? (
                   <select
@@ -531,30 +554,26 @@ export default function AdminBonusPage() {
               <select
                 value={selectedPoolId}
                 onChange={(e) => setSelectedPoolId(e.target.value)}
-                style={{ padding: 8, minWidth: 380 }}
+                style={{ minWidth: 340 }}
               >
                 {pools.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.name ?? p.id}
+                    {p.name}
                   </option>
                 ))}
               </select>
             </label>
-
-            <span style={{ fontSize: 12, opacity: 0.7 }}>
-              {selectedPoolId ? `(${selectedPoolId})` : ""}
-            </span>
 
             <label>
               Event:&nbsp;
               <select
                 value={selectedEventId}
                 onChange={(e) => setSelectedEventId(e.target.value)}
-                style={{ padding: 8, minWidth: 520 }}
+                style={{ minWidth: 520 }}
               >
                 {events.map((ev) => (
                   <option key={ev.id} value={ev.id}>
-                    {ev.name}
+                    {ev.name} {ev.starts_at ? `(${ev.starts_at})` : ""}
                   </option>
                 ))}
               </select>
@@ -563,17 +582,19 @@ export default function AdminBonusPage() {
             <button onClick={saveWeekendAll}>Save weekend answers</button>
           </div>
 
-          {selectedEvent && (
-            <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
-              Selected: <b>{selectedEvent.name}</b> • {selectedEvent.format ?? "standard"}
-            </div>
-          )}
+          <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
+            Selected:{" "}
+            {events.find((e) => e.id === selectedEventId)?.name ?? "(none)"} •{" "}
+            {events.find((e) => e.id === selectedEventId)?.weekend_type ?? "standard"}
+          </div>
 
           <div style={{ marginTop: 18, display: "grid", gap: 14 }}>
             {weekendQuestions.map((q) => (
               <div key={q.id} style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
                 <div style={{ fontWeight: 700 }}>{q.prompt}</div>
-                <div style={{ fontSize: 12, opacity: 0.7 }}>kind: {q.answer_kind} • id: {q.id}</div>
+                <div style={{ fontSize: 12, opacity: 0.7 }}>
+                  kind: {q.answer_kind} • id: {q.id}
+                </div>
 
                 {q.answer_kind === "boolean" ? (
                   <select
@@ -593,6 +614,32 @@ export default function AdminBonusPage() {
                     <option value="">— Select —</option>
                     <option value="true">Yes</option>
                     <option value="false">No</option>
+                  </select>
+                ) : q.answer_kind === "driver" ? (
+                  <select
+                    value={weekendAnswers[q.id] ?? ""}
+                    onChange={(e) => setWeekendValue(q.id, normalizeCode(e.target.value))}
+                    style={{ marginTop: 8, width: "100%", padding: 8 }}
+                  >
+                    <option value="">— Select driver —</option>
+                    {F1_DRIVERS_2026.map((d) => (
+                      <option key={d.code} value={d.code}>
+                        {d.name} ({d.code}) — {d.teamName}
+                      </option>
+                    ))}
+                  </select>
+                ) : q.answer_kind === "team" ? (
+                  <select
+                    value={weekendAnswers[q.id] ?? ""}
+                    onChange={(e) => setWeekendValue(q.id, e.target.value)}
+                    style={{ marginTop: 8, width: "100%", padding: 8 }}
+                  >
+                    <option value="">— Select team —</option>
+                    {TEAM_OPTIONS.map((t) => (
+                      <option key={t.teamId} value={t.teamId}>
+                        {t.teamName}
+                      </option>
+                    ))}
                   </select>
                 ) : (
                   <input
