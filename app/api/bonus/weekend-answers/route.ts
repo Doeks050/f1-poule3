@@ -56,9 +56,9 @@ export async function POST(req: Request) {
 
     const body = (await req.json()) as Body;
 
-    const pool_id = body.pool_id;
-    const event_id = body.event_id;
-    const question_id = body.question_id;
+    const pool_id = body.pool_id ?? "";
+    const event_id = body.event_id ?? "";
+    const question_id = body.question_id ?? "";
 
     if (!pool_id || !event_id || !question_id) {
       return jsonError("Missing pool_id/event_id/question_id", 400);
@@ -68,13 +68,10 @@ export async function POST(req: Request) {
     const admin =
       typeof supabaseAdmin === "function" ? (supabaseAdmin as any)() : (supabaseAdmin as any);
 
+    // keep your set_id logic intact (optional column in your table)
     const set_id = (body.set_id ?? (await resolveSetId(admin, pool_id, event_id))) as
       | string
       | null;
-
-    if (!set_id) {
-      return jsonError("No set_id found for this pool/event (generate a set first).", 409);
-    }
 
     const answer_json = body.answer_json ?? null;
 
@@ -85,13 +82,15 @@ export async function POST(req: Request) {
       (typeof answer_json === "object" &&
         answer_json !== null &&
         "value" in answer_json &&
-        answer_json.value == null);
+        (answer_json.value === null || answer_json.value === "" || typeof answer_json.value === "undefined"));
 
     if (isClearing) {
       const { error } = await admin
         .from("bonus_weekend_answers")
         .delete()
-        .eq("set_id", set_id)
+        // ✅ FIX: include pool/event/user/question so delete always targets the right row
+        .eq("pool_id", pool_id)
+        .eq("event_id", event_id)
         .eq("user_id", user.id)
         .eq("question_id", question_id);
 
@@ -99,16 +98,20 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, deleted: true });
     }
 
+    // ✅ FIX: write pool_id + event_id (NOT NULL columns)
     const row = {
-      set_id,
+      pool_id,
+      event_id,
+      set_id, // optional, keep it if you want
       user_id: user.id,
       question_id,
       answer_json,
     };
 
+    // ✅ FIX: conflict keys must match your UNIQUE for user answers
     const { error } = await admin
       .from("bonus_weekend_answers")
-      .upsert(row, { onConflict: "set_id,user_id,question_id" });
+      .upsert(row, { onConflict: "pool_id,event_id,user_id,question_id" });
 
     if (error) return jsonError(error.message, 400);
 
