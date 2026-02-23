@@ -385,8 +385,8 @@ export default function AdminBonusPage() {
       // IMPORTANT:
       // Dit vereist DB unique constraint: UNIQUE(pool_id, set_id, question_id)
       const { error } = await supabase
-        .from("weekend_bonus_official_answers")
-        .upsert(rows, { onConflict: "pool_id,set_id,question_id" });
+  .from("weekend_bonus_official_answers")
+  .upsert(rows, { onConflict: "pool_id,event_id,question_id" });
 
       if (error) throw error;
 
