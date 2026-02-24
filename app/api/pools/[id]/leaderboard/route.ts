@@ -218,58 +218,33 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
     }
 
     // --- BONUS: bepaal per (pool,event) de 3 geselecteerde question_ids ---
-    const { data: bonusSets, error: setErr } = await admin
-      .from("pool_event_bonus_sets")
-      .select("id,event_id")
-      .eq("pool_id", poolId)
-      .in("event_id", eventIds);
+    // --- BONUS: gebruik bonus_weekend_sets (V1 systeem) ---
 
-    dbg(reqId, DBG, "bonusSets", { count: (bonusSets ?? []).length, err: setErr?.message ?? null });
+const selectedQidsByEvent: Record<string, string[]> = {};
 
-    if (setErr) return jsonError(setErr.message, 500, reqId, DBG);
+const { data: weekendSets, error: wsErr } = await admin
+  .from("bonus_weekend_sets")
+  .select("event_id,question_ids")
+  .eq("pool_id", poolId)
+  .in("event_id", eventIds);
 
-    const setIds = (bonusSets ?? []).map((s: any) => s.id).filter(Boolean);
-    dbg(reqId, DBG, "setIds", { count: setIds.length });
+dbg(reqId, DBG, "bonus_weekend_sets", {
+  count: (weekendSets ?? []).length,
+  err: wsErr?.message ?? null,
+});
 
-    const setIdByEventId: Record<string, string> = {};
-    for (const s of bonusSets ?? []) {
-      setIdByEventId[(s as any).event_id] = (s as any).id;
-    }
+if (wsErr) return jsonError(wsErr.message, 500, reqId, DBG);
 
-    let selectedQidsByEvent: Record<string, string[]> = {};
-    if (setIds.length > 0) {
-      const { data: setQs, error: setQsErr } = await admin
-        .from("pool_event_bonus_set_questions")
-        .select("set_id,question_id,position")
-        .in("set_id", setIds)
-        .order("position", { ascending: true });
+for (const row of weekendSets ?? []) {
+  selectedQidsByEvent[(row as any).event_id] =
+    ((row as any).question_ids ?? []).slice(0, 3);
+}
 
-      dbg(reqId, DBG, "setQuestions", { count: (setQs ?? []).length, err: setQsErr?.message ?? null });
+const allSelectedQids = Array.from(
+  new Set(Object.values(selectedQidsByEvent).flat().filter(Boolean))
+);
 
-      if (setQsErr) return jsonError(setQsErr.message, 500, reqId, DBG);
-
-      // set_id -> [question_id...]
-      const qidsBySet: Record<string, string[]> = {};
-      for (const r of setQs ?? []) {
-        const sid = (r as any).set_id;
-        const qid = (r as any).question_id;
-        if (!sid || !qid) continue;
-        if (!qidsBySet[sid]) qidsBySet[sid] = [];
-        qidsBySet[sid].push(qid);
-      }
-
-      // event_id -> [question_id...]
-      for (const evId of Object.keys(setIdByEventId)) {
-        const sid = setIdByEventId[evId];
-        selectedQidsByEvent[evId] = (qidsBySet[sid] ?? []).slice(0, 3);
-      }
-    }
-
-    // flatten alle geselecteerde qids (voor batch fetch)
-    const allSelectedQids = Array.from(
-      new Set(Object.values(selectedQidsByEvent).flat().filter(Boolean))
-    );
-    dbg(reqId, DBG, "allSelectedQids", { count: allSelectedQids.length });
+dbg(reqId, DBG, "allSelectedQids", { count: allSelectedQids.length });
 
     // 7) official weekend answers (alleen selected qids)
     const officialByEvent: Record<string, Record<string, any>> = {};
