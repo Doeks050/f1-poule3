@@ -5,8 +5,7 @@ import { supabaseAdmin } from "../../../../../lib/supabaseAdmin";
 import {
   pointsForSession,
   normalizeTop10,
-  pointsForWeekendBonusAnswers,
-  mapAnswersByQuestionId,
+  pointsForWeekendBonus,
 } from "../../../../../lib/scoring";
 
 export const runtime = "nodejs";
@@ -38,46 +37,64 @@ function getBearerToken(req: Request): string | null {
 }
 
 async function getUserFromToken(accessToken: string) {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-  const supa = createClient(url, anon, { auth: { persistSession: false } });
+  const supabase = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    { global: { headers: { Authorization: `Bearer ${accessToken}` } } }
+  );
 
-  const { data, error } = await supa.auth.getUser(accessToken);
-  if (error || !data?.user) return null;
-  return data.user;
+  const { data, error } = await supabase.auth.getUser();
+  if (error) return { user: null, error: error.message };
+  return { user: data.user, error: null };
 }
 
-function pickResultsJson(row: any): any {
-  // event_results kan result_json of results (legacy) zijn
-  return row?.result_json ?? row?.results ?? null;
+function pickResultsJson(row: any) {
+  return row?.result_json ?? row?.results ?? row?.results_json ?? null;
 }
 
 function getResultTop10(resultsJson: any, sessionId: string): string[] | null {
-  const top10 = resultsJson?.sessions?.[sessionId]?.top10;
-  return normalizeTop10(top10);
+  if (!resultsJson) return null;
+
+  // Support a few possible shapes:
+  // 1) resultsJson[sessionId] = [...]
+  // 2) resultsJson.sessions[sessionId].top10 = [...]
+  // 3) resultsJson.top10BySession[sessionId] = [...]
+  const a = resultsJson?.[sessionId];
+  const b = resultsJson?.sessions?.[sessionId]?.top10;
+  const c = resultsJson?.top10BySession?.[sessionId];
+
+  return normalizeTop10(a) ?? normalizeTop10(b) ?? normalizeTop10(c);
 }
 
-function getPredTop10(predictionJson: any, sessionId: string): string[] | null {
-  const top10 = predictionJson?.sessions?.[sessionId]?.top10;
-  return normalizeTop10(top10);
+function getPredTop10(predJson: any, sessionId: string): string[] | null {
+  if (!predJson) return null;
+
+  // Support a few possible shapes:
+  // 1) predJson[sessionId] = [...]
+  // 2) predJson.sessions[sessionId].top10 = [...]
+  const a = predJson?.[sessionId];
+  const b = predJson?.sessions?.[sessionId]?.top10;
+
+  return normalizeTop10(a) ?? normalizeTop10(b);
 }
 
-export async function GET(req: Request, { params }: { params: { id: string } }) {
+export async function GET(
+  req: Request,
+  { params }: { params: { id: string } }
+) {
   try {
     const poolId = params.id;
 
-    const accessToken =
-      getBearerToken(req) || new URL(req.url).searchParams.get("accessToken");
+    const accessToken = getBearerToken(req);
+    if (!accessToken) return jsonError("Missing bearer token", 401);
 
-    if (!accessToken) return jsonError("Missing accessToken", 401);
-
-    const user = await getUserFromToken(accessToken);
-    if (!user) return jsonError("Invalid session", 401);
+    const { user, error: userErr } = await getUserFromToken(accessToken);
+    if (userErr || !user) return jsonError("Unauthorized", 401);
 
     const admin = supabaseAdmin();
 
-    // 1) toegang check
-    const { data: membership, error: memErr } = await admin
+    // 1) membership check
+    const { data: memberRow, error: memErr } = await admin
       .from("pool_members")
       .select("pool_id,user_id")
       .eq("pool_id", poolId)
@@ -85,25 +102,38 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
       .maybeSingle();
 
     if (memErr) return jsonError(memErr.message, 500);
-    if (!membership) return jsonError("Not a pool member", 403);
+    if (!memberRow) return jsonError("Not a member of this pool", 403);
 
-    // 2) events
-    const { data: events, error: eventsErr } = await admin
+    // 2) members list
+    const { data: members, error: membersErr } = await admin
+      .from("pool_members")
+      .select("user_id")
+      .eq("pool_id", poolId);
+
+    if (membersErr) return jsonError(membersErr.message, 500);
+
+    const memberIds = (members ?? []).map((m: any) => m.user_id).filter(Boolean);
+
+    // 3) user profiles (if you have it; if not, it will just omit names)
+    const { data: profiles } = await admin
+      .from("profiles")
+      .select("id,display_name,username,email")
+      .in("id", memberIds);
+
+    const profileById = new Map<string, any>();
+    for (const p of profiles ?? []) profileById.set((p as any).id, p);
+
+    // 4) events in pool (assuming you use events table)
+    const { data: events, error: evErr } = await admin
       .from("events")
-      .select("id,name,starts_at,format")
+      .select("id,name,starts_at")
       .order("starts_at", { ascending: true });
 
-    if (eventsErr) return jsonError(eventsErr.message, 500);
+    if (evErr) return jsonError(evErr.message, 500);
 
     const eventIds = (events ?? []).map((e: any) => e.id).filter(Boolean);
-    if (eventIds.length === 0) {
-      return NextResponse.json(
-        { ok: true, poolId, leaderboard: [] },
-        { headers: { "Cache-Control": "no-store" } }
-      );
-    }
 
-    // 3) sessions
+    // 5) sessions
     const { data: sessions, error: sessErr } = await admin
       .from("event_sessions")
       .select("id,event_id,session_key,name,starts_at,lock_at")
@@ -112,36 +142,7 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
 
     if (sessErr) return jsonError(sessErr.message, 500);
 
-    // 4) pool members
-    const { data: members, error: membersErr } = await admin
-      .from("pool_members")
-      .select("user_id,display_name")
-      .eq("pool_id", poolId);
-
-    if (membersErr) return jsonError(membersErr.message, 500);
-
-    const memberIds = (members ?? []).map((m: any) => m.user_id).filter(Boolean);
-
-    // profiles fallback
-    const { data: profiles, error: profErr } = await admin
-      .from("profiles")
-      .select("id,display_name")
-      .in("id", memberIds);
-
-    if (profErr) return jsonError(profErr.message, 500);
-
-    const profileNameById: Record<string, string | null> = {};
-    for (const p of profiles ?? []) {
-      profileNameById[(p as any).id] = (p as any).display_name ?? null;
-    }
-
-    const memberNameById: Record<string, string | null> = {};
-    for (const m of (members ?? []) as any[]) {
-      const direct = ((m.display_name ?? "") as string).trim();
-      memberNameById[m.user_id] = direct ? direct : (profileNameById[m.user_id] ?? null);
-    }
-
-    // 5) predictions
+    // 6) predictions
     const { data: predictions, error: predErr } = await admin
       .from("predictions")
       .select("user_id,pool_id,event_id,prediction_json")
@@ -151,10 +152,10 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
 
     if (predErr) return jsonError(predErr.message, 500);
 
-    // 6) results
+    // 7) results
     const { data: resultsRows, error: resErr } = await admin
       .from("event_results")
-      .select("event_id,result_json,results,updated_at")
+      .select("*")
       .in("event_id", eventIds);
 
     if (resErr) return jsonError(resErr.message, 500);
@@ -164,99 +165,54 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
       resultsByEvent[(r as any).event_id] = pickResultsJson(r);
     }
 
-    // --- BONUS: bepaal per (pool,event) de 3 geselecteerde question_ids ---
-    const { data: bonusSets, error: setErr } = await admin
-      .from("pool_event_bonus_sets")
-      .select("id,event_id")
-      .eq("pool_id", poolId)
+    // --- BONUS V2: batch fetch official + user weekend bonus answers (question_number 1..3) ---
+    const officialByEvent: Record<
+      string,
+      { question_number: number; answer: boolean | null }[]
+    > = {};
+    const userAnswersByUserEvent: Record<
+      string,
+      { question_number: number; answer: boolean | null }[]
+    > = {};
+
+    // Official answers for all events
+    const { data: officialRows, error: offErr } = await admin
+      .from("weekend_bonus_official_answers")
+      .select("event_id,question_number,answer")
       .in("event_id", eventIds);
 
-    if (setErr) return jsonError(setErr.message, 500);
+    if (offErr) return jsonError(offErr.message, 500);
 
-    const setIds = (bonusSets ?? []).map((s: any) => s.id).filter(Boolean);
-
-    const setIdByEventId: Record<string, string> = {};
-    for (const s of bonusSets ?? []) {
-      setIdByEventId[(s as any).event_id] = (s as any).id;
+    for (const evId of eventIds) officialByEvent[evId] = [];
+    for (const r of officialRows ?? []) {
+      const evId = (r as any).event_id as string;
+      const qn = (r as any).question_number as number;
+      const ans = (r as any).answer as boolean | null;
+      if (!evId || typeof qn !== "number") continue;
+      if (!officialByEvent[evId]) officialByEvent[evId] = [];
+      officialByEvent[evId].push({ question_number: qn, answer: ans ?? null });
     }
 
-    let selectedQidsByEvent: Record<string, string[]> = {};
-    if (setIds.length > 0) {
-      const { data: setQs, error: setQsErr } = await admin
-        .from("pool_event_bonus_set_questions")
-        .select("set_id,question_id,position")
-        .in("set_id", setIds)
-        .order("position", { ascending: true });
+    // User answers for all members + events (pool scoped)
+    const { data: userBonusRows, error: ubErr } = await admin
+      .from("weekend_bonus_user_answers")
+      .select("user_id,event_id,question_number,answer")
+      .eq("pool_id", poolId)
+      .in("event_id", eventIds)
+      .in("user_id", memberIds);
 
-      if (setQsErr) return jsonError(setQsErr.message, 500);
+    if (ubErr) return jsonError(ubErr.message, 500);
 
-      // set_id -> [question_id...]
-      const qidsBySet: Record<string, string[]> = {};
-      for (const r of setQs ?? []) {
-        const sid = (r as any).set_id;
-        const qid = (r as any).question_id;
-        if (!sid || !qid) continue;
-        if (!qidsBySet[sid]) qidsBySet[sid] = [];
-        qidsBySet[sid].push(qid);
-      }
+    for (const r of userBonusRows ?? []) {
+      const uid = (r as any).user_id as string;
+      const evId = (r as any).event_id as string;
+      const qn = (r as any).question_number as number;
+      const ans = (r as any).answer as boolean | null;
+      if (!uid || !evId || typeof qn !== "number") continue;
 
-      // event_id -> [question_id...]
-      for (const evId of Object.keys(setIdByEventId)) {
-        const sid = setIdByEventId[evId];
-        selectedQidsByEvent[evId] = (qidsBySet[sid] ?? []).slice(0, 3);
-      }
-    }
-
-    // flatten alle geselecteerde qids (voor batch fetch)
-    const allSelectedQids = Array.from(
-      new Set(Object.values(selectedQidsByEvent).flat().filter(Boolean))
-    );
-
-    // 7) official weekend answers (alleen selected qids)
-    const officialByEvent: Record<string, Record<string, any>> = {};
-    if (allSelectedQids.length > 0) {
-      const { data: officialRows, error: offErr } = await admin
-        .from("weekend_official_answers")
-        .select("event_id,question_id,answer_json")
-        .in("event_id", eventIds)
-        .in("question_id", allSelectedQids);
-
-      if (offErr) return jsonError(offErr.message, 500);
-
-      for (const evId of eventIds) officialByEvent[evId] = {};
-
-      for (const r of officialRows ?? []) {
-        const evId = (r as any).event_id;
-        const qid = (r as any).question_id;
-        if (!evId || !qid) continue;
-        if (!officialByEvent[evId]) officialByEvent[evId] = {};
-        officialByEvent[evId][qid] = (r as any).answer_json;
-      }
-    }
-
-    // 8) user weekend answers (alleen selected qids)
-    const userAnswersByUserEvent: Record<string, Record<string, any>> = {};
-    if (allSelectedQids.length > 0) {
-      const { data: userBonusRows, error: ubErr } = await admin
-        .from("bonus_weekend_answers")
-        .select("user_id,event_id,question_id,answer_json")
-        .eq("pool_id", poolId)
-        .in("event_id", eventIds)
-        .in("user_id", memberIds)
-        .in("question_id", allSelectedQids);
-
-      if (ubErr) return jsonError(ubErr.message, 500);
-
-      for (const r of userBonusRows ?? []) {
-        const uid = (r as any).user_id;
-        const evId = (r as any).event_id;
-        const qid = (r as any).question_id;
-        if (!uid || !evId || !qid) continue;
-
-        const key = `${uid}__${evId}`;
-        if (!userAnswersByUserEvent[key]) userAnswersByUserEvent[key] = {};
-        userAnswersByUserEvent[key][qid] = (r as any).answer_json;
-      }
+      const key = `${uid}__${evId}`;
+      if (!userAnswersByUserEvent[key]) userAnswersByUserEvent[key] = [];
+      userAnswersByUserEvent[key].push({ question_number: qn, answer: ans ?? null });
     }
 
     // quick lookup prediction by (user,event)
@@ -266,28 +222,33 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
     }
 
     // sessions grouped by event
-    const sessionsByEvent: Record<string, SessionRow[]> = {};
+    const sessionsByEvent = new Map<string, SessionRow[]>();
     for (const s of (sessions ?? []) as any[]) {
       const evId = (s as any).event_id;
-      if (!sessionsByEvent[evId]) sessionsByEvent[evId] = [];
-      sessionsByEvent[evId].push(s as SessionRow);
+      if (!sessionsByEvent.has(evId)) sessionsByEvent.set(evId, []);
+      sessionsByEvent.get(evId)!.push(s as SessionRow);
     }
 
-    // 9) leaderboard rows
-    const rows = memberIds.map((uid: string) => ({
-      user_id: uid,
-      display_name: memberNameById[uid] ?? null,
-      total_points: 0,
-    }));
+    // build leaderboard rows
+    const rows: any[] = [];
 
-    // 10) score optellen
+    for (const uid of memberIds) {
+      const p = profileById.get(uid);
+      rows.push({
+        user_id: uid,
+        display_name: p?.display_name ?? p?.username ?? p?.email ?? uid,
+        total_points: 0,
+      });
+    }
+
     for (const row of rows) {
-      for (const evId of eventIds) {
-        // sessions
-        const evSessions = sessionsByEvent[evId] ?? [];
-        const resultsJson = resultsByEvent[evId];
+      for (const ev of events ?? []) {
+        const evId = (ev as any).id as string;
+        const evSessions = sessionsByEvent.get(evId) ?? [];
         const pred = predByUserEvent.get(`${row.user_id}__${evId}`);
         const predJson = pred?.prediction_json ?? null;
+
+        const resultsJson = resultsByEvent[evId] ?? null;
 
         for (const s of evSessions) {
           const resultTop10 = getResultTop10(resultsJson, s.id);
@@ -297,29 +258,10 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
           row.total_points += pointsForSession(s.session_key, predTop10, resultTop10);
         }
 
-        // weekend bonus (alleen 3 selected questions)
-        const selectedQids = selectedQidsByEvent[evId] ?? [];
-        if (selectedQids.length > 0) {
-          const correctMap = officialByEvent[evId] ?? {};
-          const userMap = userAnswersByUserEvent[`${row.user_id}__${evId}`] ?? {};
-
-          // ✅ FIX: normaliseer raw answer_json naar boolean-maps via scoring helper
-          const correctRows = selectedQids
-            .filter((qid) => qid in correctMap)
-            .map((qid) => ({ question_id: qid, answer_json: correctMap[qid] }));
-
-          // Alleen tellen als er official answers bestaan
-          if (correctRows.length > 0) {
-            const userRows = selectedQids
-              .filter((qid) => qid in userMap)
-              .map((qid) => ({ question_id: qid, answer_json: userMap[qid] }));
-
-            const correctBoolMap = mapAnswersByQuestionId(correctRows);
-            const userBoolMap = mapAnswersByQuestionId(userRows);
-
-            row.total_points += pointsForWeekendBonusAnswers(userBoolMap, correctBoolMap);
-          }
-        }
+        // weekend bonus (3 vragen: question_number 1..3)
+        const official = officialByEvent[evId] ?? [];
+        const user = userAnswersByUserEvent[`${row.user_id}__${evId}`] ?? [];
+        row.total_points += pointsForWeekendBonus(user, official);
       }
     }
 
@@ -330,6 +272,6 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (e: any) {
-    return jsonError(e?.message ?? "Unknown error", 500);
+    return jsonError(e?.message ?? "Unexpected error", 500);
   }
 }
