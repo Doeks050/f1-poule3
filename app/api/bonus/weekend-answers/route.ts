@@ -51,30 +51,35 @@ function normalizeAnswerJson(input: any): any {
   if (input && typeof input === "object" && "value" in input) {
     const v = (input as any).value;
     if (typeof v === "boolean") return v;
-    return null; // treat null/undefined as "no answer"
+    return null;
   }
   if (input === null || input === undefined) return null;
-  return input; // keep as-is (debugging)
+  return input;
 }
 
-// body support:
-// A) { poolId, eventId, answers: { [questionId]: true/false } }
-// B) { poolId, eventId, answers: [ { question_id, answer_json } ] }
-// C) { poolId, eventId, responses: [...] } (fallback)
+/**
+ * Supported bodies:
+ * A) { poolId, eventId, answers: { [questionId]: true/false } }
+ * B) { poolId, eventId, answers: [ { question_id, answer_json } ] }
+ * C) { pool_id, event_id, question_id, answer_json }  <-- SINGLE ROW (your current frontend)
+ */
 function parseAnswers(body: any) {
   const poolId = body?.poolId ?? body?.pool_id ?? null;
   const eventId = body?.eventId ?? body?.event_id ?? null;
 
-  const raw =
-    body?.answers ??
-    body?.responses ??
-    body?.data ??
-    null;
-
   const rows: Array<{ question_id: string; answer_json: any }> = [];
 
+  // SINGLE ROW support (what your UI sends)
+  const singleQid = body?.question_id ?? body?.questionId ?? null;
+  if (singleQid) {
+    const aj = body?.answer_json ?? body?.answerJson ?? body?.value ?? body?.answer ?? null;
+    rows.push({ question_id: singleQid, answer_json: aj });
+    return { poolId, eventId, rows };
+  }
+
+  const raw = body?.answers ?? body?.responses ?? body?.data ?? null;
+
   if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-    // map form
     for (const [qid, val] of Object.entries(raw)) {
       if (!qid) continue;
       rows.push({ question_id: qid, answer_json: val });
@@ -140,18 +145,15 @@ export async function POST(req: Request) {
     if (memErr) return jsonError(memErr.message, 500);
     if (!mem) return jsonError("Not a pool member", 403);
 
-    // We will do "update if exists else insert" PER question.
-    // This works even if there is NO unique constraint.
     const results: Array<{ question_id: string; action: string }> = [];
 
     for (const r of rows) {
       const questionId = r.question_id;
       const answerJson = normalizeAnswerJson(r.answer_json);
 
-      // If answerJson is null => we still store null (or you can delete row). We'll store null.
-      dbg(reqId, DBG, "upsert row", { questionId, answerJson });
+      dbg(reqId, DBG, "save row", { questionId, answerJson });
 
-      // 1) check if row exists
+      // check existing
       const { data: existing, error: exErr } = await admin
         .from("event_bonus_answers")
         .select("id")
@@ -167,7 +169,6 @@ export async function POST(req: Request) {
       }
 
       if (existing?.id) {
-        // 2a) update
         const { error: updErr } = await admin
           .from("event_bonus_answers")
           .update({
@@ -183,7 +184,6 @@ export async function POST(req: Request) {
 
         results.push({ question_id: questionId, action: "updated" });
       } else {
-        // 2b) insert
         const { error: insErr } = await admin
           .from("event_bonus_answers")
           .insert({
