@@ -3,10 +3,9 @@ import { createClient } from "@supabase/supabase-js";
 import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-// --------------------
-// Debug helpers
-// --------------------
 function makeReqId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -24,9 +23,13 @@ function dbg(reqId: string, enabled: boolean, label: string, data?: any) {
   if (data !== undefined) console.log(prefix, data);
   else console.log(prefix);
 }
+
 function jsonError(message: string, status = 400, extra?: any) {
-  if (extra) console.log("[WEEKEND_ANSWERS] ERROR EXTRA:", extra);
-  return NextResponse.json({ error: message }, { status });
+  if (extra) console.log(`[WEEKEND_ANSWERS] ERROR EXTRA:`, extra);
+  return NextResponse.json(
+    { error: message },
+    { status, headers: { "Cache-Control": "no-store" } }
+  );
 }
 
 function getBearerToken(req: Request): string | null {
@@ -35,66 +38,33 @@ function getBearerToken(req: Request): string | null {
   return m ? m[1] : null;
 }
 
-async function getUserFromToken(accessToken: string, reqId: string, DBG: boolean) {
+async function getUserFromToken(accessToken: string) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
   const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
   const supa = createClient(url, anon, { auth: { persistSession: false } });
   const { data, error } = await supa.auth.getUser(accessToken);
-  dbg(reqId, DBG, "auth.getUser", { ok: !!data?.user, err: error?.message ?? null });
   if (error || !data?.user) return null;
   return data.user;
 }
 
-// Accept both: boolean OR { value: boolean|null }
-function normalizeAnswerJson(input: any): any {
+// Normaliseert zowel boolean als {value:boolean|null}
+function readAnswerJson(input: any): boolean | null | undefined {
   if (typeof input === "boolean") return input;
   if (input && typeof input === "object" && "value" in input) {
     const v = (input as any).value;
     if (typeof v === "boolean") return v;
-    return null;
+    if (v === null) return null;
   }
-  if (input === null || input === undefined) return null;
-  return input;
+  if (input === null) return null;
+  return undefined;
 }
 
-/**
- * Supported bodies:
- * A) { poolId, eventId, answers: { [questionId]: true/false } }
- * B) { poolId, eventId, answers: [ { question_id, answer_json } ] }
- * C) { pool_id, event_id, question_id, answer_json }  <-- SINGLE ROW (your current frontend)
- */
-function parseAnswers(body: any) {
-  const poolId = body?.poolId ?? body?.pool_id ?? null;
-  const eventId = body?.eventId ?? body?.event_id ?? null;
-
-  const rows: Array<{ question_id: string; answer_json: any }> = [];
-
-  // SINGLE ROW support (what your UI sends)
-  const singleQid = body?.question_id ?? body?.questionId ?? null;
-  if (singleQid) {
-    const aj = body?.answer_json ?? body?.answerJson ?? body?.value ?? body?.answer ?? null;
-    rows.push({ question_id: singleQid, answer_json: aj });
-    return { poolId, eventId, rows };
-  }
-
-  const raw = body?.answers ?? body?.responses ?? body?.data ?? null;
-
-  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-    for (const [qid, val] of Object.entries(raw)) {
-      if (!qid) continue;
-      rows.push({ question_id: qid, answer_json: val });
-    }
-  } else if (Array.isArray(raw)) {
-    for (const r of raw) {
-      const qid = r?.question_id ?? r?.questionId ?? r?.qid ?? null;
-      if (!qid) continue;
-      const aj = r?.answer_json ?? r?.answerJson ?? r?.value ?? r?.answer ?? null;
-      rows.push({ question_id: qid, answer_json: aj });
-    }
-  }
-
-  return { poolId, eventId, rows };
-}
+type IncomingRow = {
+  pool_id: string;
+  event_id: string;
+  question_id: string;
+  answer_json: any; // boolean | null | {value: boolean|null}
+};
 
 export async function POST(req: Request) {
   const reqId = makeReqId();
@@ -102,37 +72,46 @@ export async function POST(req: Request) {
 
   try {
     const url = new URL(req.url);
-
     const accessToken =
       getBearerToken(req) || url.searchParams.get("accessToken");
 
-    dbg(reqId, DBG, "token present", { hasAccessToken: !!accessToken });
+    dbg(reqId, DBG, "start", { hasAccessToken: !!accessToken });
 
     if (!accessToken) return jsonError("Missing accessToken", 401);
 
-    const user = await getUserFromToken(accessToken, reqId, DBG);
+    const user = await getUserFromToken(accessToken);
+    dbg(reqId, DBG, "user", { ok: !!user, userId: user?.id ?? null });
     if (!user) return jsonError("Invalid session", 401);
 
     const body = await req.json().catch(() => null);
     dbg(reqId, DBG, "body received", body);
 
-    if (!body) return jsonError("Invalid JSON body", 400);
+    // Support:
+    // { pool_id, event_id, question_id, answer_json }
+    // or { rows: [ ... ] }
+    const rows: IncomingRow[] = Array.isArray(body?.rows)
+      ? body.rows
+      : body
+        ? [body]
+        : [];
 
-    const { poolId, eventId, rows } = parseAnswers(body);
+    if (!rows.length) return jsonError("No answers provided", 400);
 
-    dbg(reqId, DBG, "parsed", {
-      poolId,
-      eventId,
-      rowsCount: rows.length,
-      sample: rows.slice(0, 3),
-    });
-
-    if (!poolId || !eventId) return jsonError("Missing poolId or eventId", 400);
-    if (!rows || rows.length === 0) return jsonError("No answers provided", 400);
+    // Validate required fields (no assumptions)
+    for (const r of rows) {
+      if (!r?.pool_id || !r?.event_id || !r?.question_id) {
+        return jsonError("Missing pool_id / event_id / question_id", 400, {
+          badRow: r,
+        });
+      }
+    }
 
     const admin = supabaseAdmin();
 
-    // membership check
+    // membership check per pool (veilig)
+    // (we doen 1 check op de eerste pool_id; je frontend stuurt altijd 1 pool per call)
+    const poolId = rows[0].pool_id;
+
     const { data: mem, error: memErr } = await admin
       .from("pool_members")
       .select("pool_id,user_id")
@@ -145,72 +124,103 @@ export async function POST(req: Request) {
     if (memErr) return jsonError(memErr.message, 500);
     if (!mem) return jsonError("Not a pool member", 403);
 
-    const results: Array<{ question_id: string; action: string }> = [];
+    // Process each row:
+    // - boolean => upsert
+    // - null => delete (wis)
+    // - undefined/invalid => 400
+    const results: any[] = [];
 
     for (const r of rows) {
-      const questionId = r.question_id;
-      const answerJson = normalizeAnswerJson(r.answer_json);
+      const parsed = readAnswerJson(r.answer_json);
 
-      dbg(reqId, DBG, "save row", { questionId, answerJson });
+      dbg(reqId, DBG, "parsed row", {
+        pool_id: r.pool_id,
+        event_id: r.event_id,
+        question_id: r.question_id,
+        parsed,
+        raw: r.answer_json,
+      });
 
-      // check existing
-      const { data: existing, error: exErr } = await admin
+      if (parsed === undefined) {
+        return jsonError("Invalid answer_json (must be boolean or null)", 400, {
+          question_id: r.question_id,
+          answer_json: r.answer_json,
+        });
+      }
+
+      if (parsed === null) {
+        // WIS: delete existing row so NOT NULL never violated
+        dbg(reqId, DBG, "delete row", {
+          pool_id: r.pool_id,
+          event_id: r.event_id,
+          question_id: r.question_id,
+          user_id: user.id,
+        });
+
+        const { error: delErr } = await admin
+          .from("event_bonus_answers")
+          .delete()
+          .eq("pool_id", r.pool_id)
+          .eq("event_id", r.event_id)
+          .eq("user_id", user.id)
+          .eq("question_id", r.question_id);
+
+        if (delErr) {
+          dbg(reqId, DBG, "delete error", {
+            questionId: r.question_id,
+            err: delErr.message,
+          });
+          return jsonError(delErr.message, 500, { step: "delete", r });
+        }
+
+        results.push({ question_id: r.question_id, action: "deleted" });
+        continue;
+      }
+
+      // SAVE boolean true/false
+      const payload = {
+        pool_id: r.pool_id,
+        event_id: r.event_id,
+        user_id: user.id,
+        question_id: r.question_id,
+        answer_json: parsed, // always boolean here
+      };
+
+      dbg(reqId, DBG, "upsert row", payload);
+
+      // IMPORTANT:
+      // conflict target moet matchen met je unique constraint.
+      // In jouw eerdere SQL/screenshot was dit meestal:
+      // (pool_id, event_id, user_id, question_id)
+      const { data: up, error: upErr } = await admin
         .from("event_bonus_answers")
-        .select("id")
-        .eq("pool_id", poolId)
-        .eq("event_id", eventId)
-        .eq("user_id", user.id)
-        .eq("question_id", questionId)
+        .upsert(payload, { onConflict: "pool_id,event_id,user_id,question_id" })
+        .select("pool_id,event_id,user_id,question_id,answer_json")
         .maybeSingle();
 
-      if (exErr) {
-        dbg(reqId, DBG, "select existing error", { questionId, err: exErr.message });
-        return jsonError(exErr.message, 500, { step: "select-existing", questionId });
+      if (upErr) {
+        dbg(reqId, DBG, "upsert error", {
+          questionId: r.question_id,
+          err: upErr.message,
+        });
+        return jsonError(upErr.message, 500, { step: "upsert", r });
       }
 
-      if (existing?.id) {
-        const { error: updErr } = await admin
-          .from("event_bonus_answers")
-          .update({
-            answer_json: answerJson,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", existing.id);
-
-        if (updErr) {
-          dbg(reqId, DBG, "update error", { questionId, err: updErr.message });
-          return jsonError(updErr.message, 500, { step: "update", questionId });
-        }
-
-        results.push({ question_id: questionId, action: "updated" });
-      } else {
-        const { error: insErr } = await admin
-          .from("event_bonus_answers")
-          .insert({
-            pool_id: poolId,
-            event_id: eventId,
-            user_id: user.id,
-            question_id: questionId,
-            answer_json: answerJson,
-          });
-
-        if (insErr) {
-          dbg(reqId, DBG, "insert error", { questionId, err: insErr.message });
-          return jsonError(insErr.message, 500, { step: "insert", questionId });
-        }
-
-        results.push({ question_id: questionId, action: "inserted" });
-      }
+      results.push({ question_id: r.question_id, action: "upserted", row: up });
     }
 
-    dbg(reqId, DBG, "done", { saved: results.length });
+    dbg(reqId, DBG, "done", { savedCount: results.length });
 
     return NextResponse.json(
-      { ok: true, poolId, eventId, saved: results },
+      { ok: true, results },
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (e: any) {
-    console.log(`[WEEKEND_ANSWERS][${reqId}] ERROR 500`, e?.message ?? e, e?.stack ?? "");
+    console.log(
+      `[WEEKEND_ANSWERS][${reqId}] ERROR 500`,
+      e?.message ?? e,
+      e?.stack ?? ""
+    );
     return jsonError(e?.message ?? "Unknown error", 500);
   }
 }
