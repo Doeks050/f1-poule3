@@ -250,7 +250,7 @@ dbg(reqId, DBG, "allSelectedQids", { count: allSelectedQids.length });
     const officialByEvent: Record<string, Record<string, any>> = {};
     if (allSelectedQids.length > 0) {
       const { data: officialRows, error: offErr } = await admin
-        .from("weekend_official_answers")
+        .from("weekend_bonus_official_answers")
         .select("event_id,question_id,answer_json")
         .in("event_id", eventIds)
         .in("question_id", allSelectedQids);
