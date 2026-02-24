@@ -102,7 +102,7 @@ export function mapAnswersByQuestionId(
 }
 
 // ------------------------------
-// Weekend bonusvragen (5 punten per correct) - LEGACY (V1)
+// Weekend bonusvragen (5 punten per correct)
 // Verwacht Records met booleans (true/false) of undefined (geen antwoord)
 // ------------------------------
 export function pointsForWeekendBonusAnswers(
@@ -127,38 +127,38 @@ export function pointsForWeekendBonusAnswers(
   return points;
 }
 
+// Backwards-compatible alias (als je route.ts nog pointsForWeekendBonus gebruikt)
+export const pointsForWeekendBonus = pointsForWeekendBonusAnswers;
+
 // ------------------------------
-// Weekend bonus V2 (NIEUW): question_number 1..3, answer boolean
+// DEBUG helper (NOOP tenzij je hem aanroept)
 // ------------------------------
-export function pointsForWeekendBonusV2(
-  userRows: { question_number: number; answer: boolean | null }[] | null,
-  officialRows: { question_number: number; answer: boolean | null }[] | null
+export function pointsForWeekendBonusAnswersDebug(
+  userAnswers: Record<string, boolean | undefined> | null,
+  correctAnswers: Record<string, boolean | undefined> | null,
+  debug?: (msg: string, data?: any) => void
 ): number {
-  if (!userRows || !officialRows) return 0;
-
-  const userMap = new Map<number, boolean | null>();
-  for (const r of userRows) userMap.set(r.question_number, r.answer);
-
-  let points = 0;
-  for (const off of officialRows) {
-    const u = userMap.get(off.question_number);
-    if (
-      typeof off.answer === "boolean" &&
-      typeof u === "boolean" &&
-      off.answer === u
-    ) {
-      points += 5;
-    }
+  if (!userAnswers || !correctAnswers) {
+    debug?.("BONUS_V1: missing maps", { hasUser: !!userAnswers, hasCorrect: !!correctAnswers });
+    return 0;
   }
 
+  const correctKeys = Object.keys(correctAnswers);
+  debug?.("BONUS_V1: scoring start", {
+    correctKeys: correctKeys.length,
+    userKeys: Object.keys(userAnswers).length,
+  });
+
+  let points = 0;
+  for (const qid of correctKeys) {
+    const u = userAnswers[qid];
+    const c = correctAnswers[qid];
+    if (typeof u === "boolean" && typeof c === "boolean" && u === c) points += 5;
+  }
+
+  debug?.("BONUS_V1: scoring done", { points });
   return points;
 }
-
-// ✅ Default export used by leaderboard: V2
-export const pointsForWeekendBonus = pointsForWeekendBonusV2;
-
-// (optioneel) legacy alias als je ergens nog V1 gebruikt
-export const pointsForWeekendBonusLegacy = pointsForWeekendBonusAnswers;
 
 // ------------------------------
 // Season champion vragen (50 punten)
