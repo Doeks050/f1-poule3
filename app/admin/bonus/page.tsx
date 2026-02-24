@@ -104,10 +104,9 @@ export default function AdminBonusPage() {
       if (!selectedPoolId) return;
 
       const { data: eventRows, error: eventErr } = await supabase
-        .from("events")
-        .select("id,name,starts_at")
-        .eq("pool_id", selectedPoolId as string)
-        .order("starts_at", { ascending: true });
+      .from("events")
+      .select("id,name,starts_at")
+      .order("starts_at", { ascending: true });
 
       if (eventErr) console.log("[ADMIN_BONUS] events error", eventErr);
 
@@ -228,17 +227,30 @@ export default function AdminBonusPage() {
 
       // 1) Koppeltabel met season vragen per pool
       const { data: sLink, error: sLinkErr } = await supabase
-        .from("pool_season_bonus_set_questions")
-        .select("*")
-        .eq("pool_id", selectedPoolId as string)
-        .order("order_index", { ascending: true });
+  .from("pool_season_bonus_set_questions")
+  .select("*")
+  .order("order_index", { ascending: true });
 
-      if (sLinkErr) {
-        console.log("[ADMIN_BONUS] season links error", sLinkErr);
-        setSeasonError(sLinkErr.message);
-        setSeasonLoading(false);
-        return;
-      }
+if (sLinkErr) {
+  console.log("[ADMIN_BONUS] season links error", sLinkErr);
+  setSeasonError(sLinkErr.message);
+  setSeasonLoading(false);
+  return;
+}
+
+const seasonSetId: string | null =
+  (seasonSet as any)?.set_id ?? (seasonSet as any)?.id ?? null;
+
+// Filter client-side omdat we niet zeker weten hoe de FK heet
+const filteredLinks = (sLink ?? []).filter((r: any) => {
+  if (!seasonSetId) return true;
+  if ("set_id" in r) return r.set_id === seasonSetId;
+  if ("pool_season_bonus_set_id" in r) return r.pool_season_bonus_set_id === seasonSetId;
+  // als geen kolom gevonden → laat hem door (dan zie je tenminste iets)
+  return true;
+});
+
+const sQuestionIds = filteredLinks.map((r: any) => r.question_id).filter(Boolean);
 
       // Als jouw link table set_id heeft, filteren we client-side op de juiste set
       const filteredLinks = (sLink ?? []).filter((r: any) => {
