@@ -37,64 +37,46 @@ function getBearerToken(req: Request): string | null {
 }
 
 async function getUserFromToken(accessToken: string) {
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    { global: { headers: { Authorization: `Bearer ${accessToken}` } } }
-  );
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+  const supa = createClient(url, anon, { auth: { persistSession: false } });
 
-  const { data, error } = await supabase.auth.getUser();
-  if (error) return { user: null, error: error.message };
-  return { user: data.user, error: null };
+  const { data, error } = await supa.auth.getUser(accessToken);
+  if (error || !data?.user) return null;
+  return data.user;
 }
 
-function pickResultsJson(row: any) {
-  return row?.result_json ?? row?.results ?? row?.results_json ?? null;
+function pickResultsJson(row: any): any {
+  // event_results kan result_json of results (legacy) zijn
+  return row?.result_json ?? row?.results ?? null;
 }
 
 function getResultTop10(resultsJson: any, sessionId: string): string[] | null {
-  if (!resultsJson) return null;
-
-  // Support a few possible shapes:
-  // 1) resultsJson[sessionId] = [...]
-  // 2) resultsJson.sessions[sessionId].top10 = [...]
-  // 3) resultsJson.top10BySession[sessionId] = [...]
-  const a = resultsJson?.[sessionId];
-  const b = resultsJson?.sessions?.[sessionId]?.top10;
-  const c = resultsJson?.top10BySession?.[sessionId];
-
-  return normalizeTop10(a) ?? normalizeTop10(b) ?? normalizeTop10(c);
+  const top10 = resultsJson?.sessions?.[sessionId]?.top10;
+  return normalizeTop10(top10);
 }
 
-function getPredTop10(predJson: any, sessionId: string): string[] | null {
-  if (!predJson) return null;
-
-  // Support a few possible shapes:
-  // 1) predJson[sessionId] = [...]
-  // 2) predJson.sessions[sessionId].top10 = [...]
-  const a = predJson?.[sessionId];
-  const b = predJson?.sessions?.[sessionId]?.top10;
-
-  return normalizeTop10(a) ?? normalizeTop10(b);
+function getPredTop10(predictionJson: any, sessionId: string): string[] | null {
+  const top10 = predictionJson?.sessions?.[sessionId]?.top10;
+  return normalizeTop10(top10);
 }
 
-export async function GET(
-  req: Request,
-  { params }: { params: { id: string } }
-) {
+export async function GET(req: Request, { params }: { params: { id: string } }) {
   try {
     const poolId = params.id;
 
-    const accessToken = getBearerToken(req);
-    if (!accessToken) return jsonError("Missing bearer token", 401);
+    const accessToken =
+      getBearerToken(req) || new URL(req.url).searchParams.get("accessToken");
 
-    const { user, error: userErr } = await getUserFromToken(accessToken);
-    if (userErr || !user) return jsonError("Unauthorized", 401);
+    if (!accessToken) return jsonError("Missing accessToken", 401);
+
+    const user = await getUserFromToken(accessToken);
+    if (!user) return jsonError("Invalid session", 401);
 
     const admin = supabaseAdmin();
 
-    // 1) membership check
-    const { data: memberRow, error: memErr } = await admin
+    // 1) toegang check
+    const { data: membership, error: memErr } = await admin
       .from("pool_members")
       .select("pool_id,user_id")
       .eq("pool_id", poolId)
@@ -102,38 +84,25 @@ export async function GET(
       .maybeSingle();
 
     if (memErr) return jsonError(memErr.message, 500);
-    if (!memberRow) return jsonError("Not a member of this pool", 403);
+    if (!membership) return jsonError("Not a pool member", 403);
 
-    // 2) members list
-    const { data: members, error: membersErr } = await admin
-      .from("pool_members")
-      .select("user_id")
-      .eq("pool_id", poolId);
-
-    if (membersErr) return jsonError(membersErr.message, 500);
-
-    const memberIds = (members ?? []).map((m: any) => m.user_id).filter(Boolean);
-
-    // 3) user profiles (if you have it; if not, it will just omit names)
-    const { data: profiles } = await admin
-      .from("profiles")
-      .select("id,display_name,username,email")
-      .in("id", memberIds);
-
-    const profileById = new Map<string, any>();
-    for (const p of profiles ?? []) profileById.set((p as any).id, p);
-
-    // 4) events in pool (assuming you use events table)
-    const { data: events, error: evErr } = await admin
+    // 2) events
+    const { data: events, error: eventsErr } = await admin
       .from("events")
-      .select("id,name,starts_at")
+      .select("id,name,starts_at,format")
       .order("starts_at", { ascending: true });
 
-    if (evErr) return jsonError(evErr.message, 500);
+    if (eventsErr) return jsonError(eventsErr.message, 500);
 
     const eventIds = (events ?? []).map((e: any) => e.id).filter(Boolean);
+    if (eventIds.length === 0) {
+      return NextResponse.json(
+        { ok: true, poolId, leaderboard: [] },
+        { headers: { "Cache-Control": "no-store" } }
+      );
+    }
 
-    // 5) sessions
+    // 3) sessions
     const { data: sessions, error: sessErr } = await admin
       .from("event_sessions")
       .select("id,event_id,session_key,name,starts_at,lock_at")
@@ -142,7 +111,36 @@ export async function GET(
 
     if (sessErr) return jsonError(sessErr.message, 500);
 
-    // 6) predictions
+    // 4) pool members
+    const { data: members, error: membersErr } = await admin
+      .from("pool_members")
+      .select("user_id,display_name")
+      .eq("pool_id", poolId);
+
+    if (membersErr) return jsonError(membersErr.message, 500);
+
+    const memberIds = (members ?? []).map((m: any) => m.user_id).filter(Boolean);
+
+    // profiles fallback
+    const { data: profiles, error: profErr } = await admin
+      .from("profiles")
+      .select("id,display_name")
+      .in("id", memberIds);
+
+    if (profErr) return jsonError(profErr.message, 500);
+
+    const profileNameById: Record<string, string | null> = {};
+    for (const p of profiles ?? []) {
+      profileNameById[(p as any).id] = (p as any).display_name ?? null;
+    }
+
+    const memberNameById: Record<string, string | null> = {};
+    for (const m of (members ?? []) as any[]) {
+      const direct = ((m.display_name ?? "") as string).trim();
+      memberNameById[m.user_id] = direct ? direct : (profileNameById[m.user_id] ?? null);
+    }
+
+    // 5) predictions
     const { data: predictions, error: predErr } = await admin
       .from("predictions")
       .select("user_id,pool_id,event_id,prediction_json")
@@ -152,10 +150,10 @@ export async function GET(
 
     if (predErr) return jsonError(predErr.message, 500);
 
-    // 7) results
+    // 6) results
     const { data: resultsRows, error: resErr } = await admin
       .from("event_results")
-      .select("*")
+      .select("event_id,result_json,results,updated_at")
       .in("event_id", eventIds);
 
     if (resErr) return jsonError(resErr.message, 500);
@@ -170,12 +168,8 @@ export async function GET(
       string,
       { question_number: number; answer: boolean | null }[]
     > = {};
-    const userAnswersByUserEvent: Record<
-      string,
-      { question_number: number; answer: boolean | null }[]
-    > = {};
+    for (const evId of eventIds) officialByEvent[evId] = [];
 
-    // Official answers for all events
     const { data: officialRows, error: offErr } = await admin
       .from("weekend_bonus_official_answers")
       .select("event_id,question_number,answer")
@@ -183,17 +177,20 @@ export async function GET(
 
     if (offErr) return jsonError(offErr.message, 500);
 
-    for (const evId of eventIds) officialByEvent[evId] = [];
     for (const r of officialRows ?? []) {
       const evId = (r as any).event_id as string;
       const qn = (r as any).question_number as number;
-      const ans = (r as any).answer as boolean | null;
+      const ans = ((r as any).answer ?? null) as boolean | null;
       if (!evId || typeof qn !== "number") continue;
       if (!officialByEvent[evId]) officialByEvent[evId] = [];
-      officialByEvent[evId].push({ question_number: qn, answer: ans ?? null });
+      officialByEvent[evId].push({ question_number: qn, answer: ans });
     }
 
-    // User answers for all members + events (pool scoped)
+    const userAnswersByUserEvent: Record<
+      string,
+      { question_number: number; answer: boolean | null }[]
+    > = {};
+
     const { data: userBonusRows, error: ubErr } = await admin
       .from("weekend_bonus_user_answers")
       .select("user_id,event_id,question_number,answer")
@@ -207,12 +204,12 @@ export async function GET(
       const uid = (r as any).user_id as string;
       const evId = (r as any).event_id as string;
       const qn = (r as any).question_number as number;
-      const ans = (r as any).answer as boolean | null;
+      const ans = ((r as any).answer ?? null) as boolean | null;
       if (!uid || !evId || typeof qn !== "number") continue;
 
       const key = `${uid}__${evId}`;
       if (!userAnswersByUserEvent[key]) userAnswersByUserEvent[key] = [];
-      userAnswersByUserEvent[key].push({ question_number: qn, answer: ans ?? null });
+      userAnswersByUserEvent[key].push({ question_number: qn, answer: ans });
     }
 
     // quick lookup prediction by (user,event)
@@ -222,33 +219,28 @@ export async function GET(
     }
 
     // sessions grouped by event
-    const sessionsByEvent = new Map<string, SessionRow[]>();
+    const sessionsByEvent: Record<string, SessionRow[]> = {};
     for (const s of (sessions ?? []) as any[]) {
       const evId = (s as any).event_id;
-      if (!sessionsByEvent.has(evId)) sessionsByEvent.set(evId, []);
-      sessionsByEvent.get(evId)!.push(s as SessionRow);
+      if (!sessionsByEvent[evId]) sessionsByEvent[evId] = [];
+      sessionsByEvent[evId].push(s as SessionRow);
     }
 
-    // build leaderboard rows
-    const rows: any[] = [];
+    // 9) leaderboard rows
+    const rows = memberIds.map((uid: string) => ({
+      user_id: uid,
+      display_name: memberNameById[uid] ?? null,
+      total_points: 0,
+    }));
 
-    for (const uid of memberIds) {
-      const p = profileById.get(uid);
-      rows.push({
-        user_id: uid,
-        display_name: p?.display_name ?? p?.username ?? p?.email ?? uid,
-        total_points: 0,
-      });
-    }
-
+    // 10) score optellen
     for (const row of rows) {
-      for (const ev of events ?? []) {
-        const evId = (ev as any).id as string;
-        const evSessions = sessionsByEvent.get(evId) ?? [];
+      for (const evId of eventIds) {
+        // sessions
+        const evSessions = sessionsByEvent[evId] ?? [];
+        const resultsJson = resultsByEvent[evId];
         const pred = predByUserEvent.get(`${row.user_id}__${evId}`);
         const predJson = pred?.prediction_json ?? null;
-
-        const resultsJson = resultsByEvent[evId] ?? null;
 
         for (const s of evSessions) {
           const resultTop10 = getResultTop10(resultsJson, s.id);
@@ -258,10 +250,10 @@ export async function GET(
           row.total_points += pointsForSession(s.session_key, predTop10, resultTop10);
         }
 
-        // weekend bonus (3 vragen: question_number 1..3)
+        // weekend bonus V2 (question_number 1..3)
         const official = officialByEvent[evId] ?? [];
-        const user = userAnswersByUserEvent[`${row.user_id}__${evId}`] ?? [];
-        row.total_points += pointsForWeekendBonus(user, official);
+        const userBonus = userAnswersByUserEvent[`${row.user_id}__${evId}`] ?? [];
+        row.total_points += pointsForWeekendBonus(userBonus, official);
       }
     }
 
@@ -272,6 +264,6 @@ export async function GET(
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (e: any) {
-    return jsonError(e?.message ?? "Unexpected error", 500);
+    return jsonError(e?.message ?? "Unknown error", 500);
   }
 }
