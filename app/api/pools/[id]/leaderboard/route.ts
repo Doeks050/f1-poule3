@@ -274,7 +274,7 @@ dbg(reqId, DBG, "allSelectedQids", { count: allSelectedQids.length });
     const userAnswersByUserEvent: Record<string, Record<string, any>> = {};
     if (allSelectedQids.length > 0) {
       const { data: userBonusRows, error: ubErr } = await admin
-        .from("bonus_weekend_answers")
+        .from("event_bonus_answers")
         .select("user_id,event_id,question_id,answer_json")
         .eq("pool_id", poolId)
         .in("event_id", eventIds)
