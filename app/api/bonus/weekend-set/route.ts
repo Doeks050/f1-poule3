@@ -46,31 +46,43 @@ async function getUserFromToken(accessToken: string) {
   return data.user;
 }
 
+// Random selectie zonder DB-functies: shuffle in JS
+function pickRandom<T>(arr: T[], n: number): T[] {
+  const copy = [...arr];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy.slice(0, n);
+}
+
 export async function GET(req: Request) {
   const reqId = makeReqId();
   const DBG = isDbgEnabled(req);
 
   try {
     const url = new URL(req.url);
+    const poolId = url.searchParams.get("poolId");
+    const eventId = url.searchParams.get("eventId");
 
-    const poolId = url.searchParams.get("poolId") ?? url.searchParams.get("pool_id");
-    const eventId = url.searchParams.get("eventId") ?? url.searchParams.get("event_id");
-
-    dbg(reqId, DBG, "query", { poolId, eventId });
+    dbg(reqId, DBG, "start", { poolId, eventId });
 
     if (!poolId || !eventId) return jsonError("Missing poolId or eventId", 400);
 
-    const accessToken = getBearerToken(req) || url.searchParams.get("accessToken");
+    const accessToken =
+      getBearerToken(req) || url.searchParams.get("accessToken");
+
     dbg(reqId, DBG, "token present", { hasAccessToken: !!accessToken });
+
     if (!accessToken) return jsonError("Missing accessToken", 401);
 
     const user = await getUserFromToken(accessToken);
-    dbg(reqId, DBG, "auth.getUser", { ok: !!user });
+    dbg(reqId, DBG, "user", { ok: !!user, userId: user?.id ?? null });
     if (!user) return jsonError("Invalid session", 401);
 
     const admin = supabaseAdmin();
 
-    // membership check
+    // membership check (pool_members)
     const { data: mem, error: memErr } = await admin
       .from("pool_members")
       .select("pool_id,user_id")
@@ -79,62 +91,110 @@ export async function GET(req: Request) {
       .maybeSingle();
 
     dbg(reqId, DBG, "membership", { ok: !!mem, err: memErr?.message ?? null });
-
     if (memErr) return jsonError(memErr.message, 500);
     if (!mem) return jsonError("Not a pool member", 403);
 
-    // Fetch set (your current schema uses bonus_weekend_sets)
-    const { data: setRow, error: setErr } = await admin
+    // 1) Bestaat er al een set voor (pool,event)?
+    const { data: existing, error: exErr } = await admin
       .from("bonus_weekend_sets")
-      .select("id,pool_id,event_id,question_1_id,question_2_id,question_3_id")
+      .select("id,question_ids")
       .eq("pool_id", poolId)
       .eq("event_id", eventId)
       .maybeSingle();
 
-    dbg(reqId, DBG, "bonus_weekend_sets", {
-      ok: !!setRow,
-      err: setErr?.message ?? null,
-      setId: setRow?.id ?? null,
+    dbg(reqId, DBG, "existing set", {
+      has: !!existing,
+      setId: existing?.id ?? null,
+      qCount: (existing?.question_ids ?? []).length,
+      err: exErr?.message ?? null,
     });
 
-    if (setErr) return jsonError(setErr.message, 500);
-    if (!setRow) return jsonError("No weekend set found for this pool/event", 404);
+    if (exErr) return jsonError(exErr.message, 500);
 
-    const questionIds = [
-      setRow.question_1_id,
-      setRow.question_2_id,
-      setRow.question_3_id,
-    ].filter(Boolean) as string[];
+    let questionIds: string[] = (existing?.question_ids ?? []) as string[];
 
+    // 2) Geen set? Maak hem aan met exact 3 random actieve weekend questions
     if (questionIds.length !== 3) {
-      dbg(reqId, DBG, "invalid set questionIds", { questionIds });
-      return jsonError("Weekend set does not have exactly 3 questions", 500);
+      const { data: bankRows, error: bankErr } = await admin
+        .from("bonus_question_bank")
+        .select("id,scope,answer_kind,is_active")
+        .eq("is_active", true)
+        .eq("scope", "weekend")
+        .eq("answer_kind", "boolean");
+
+      dbg(reqId, DBG, "question bank fetch", {
+        count: (bankRows ?? []).length,
+        err: bankErr?.message ?? null,
+      });
+
+      if (bankErr) return jsonError(bankErr.message, 500);
+
+      const ids = (bankRows ?? []).map((r: any) => r.id).filter(Boolean);
+
+      if (ids.length < 3) {
+        return jsonError(
+          "Not enough active weekend boolean questions in bonus_question_bank",
+          400
+        );
+      }
+
+      questionIds = pickRandom(ids, 3);
+
+      dbg(reqId, DBG, "picked random qids", { questionIds });
+
+      // Upsert set
+      // IMPORTANT: bonus_weekend_sets moet uniek zijn op (pool_id,event_id)
+      const { data: upSet, error: upErr } = await admin
+        .from("bonus_weekend_sets")
+        .upsert(
+          {
+            pool_id: poolId,
+            event_id: eventId,
+            question_ids: questionIds,
+          },
+          { onConflict: "pool_id,event_id" }
+        )
+        .select("id,question_ids")
+        .maybeSingle();
+
+      dbg(reqId, DBG, "upsert set", {
+        ok: !!upSet,
+        setId: upSet?.id ?? null,
+        qCount: (upSet?.question_ids ?? []).length,
+        err: upErr?.message ?? null,
+      });
+
+      if (upErr) return jsonError(upErr.message, 500);
+
+      questionIds = (upSet?.question_ids ?? questionIds) as string[];
     }
 
-    // Load question prompts from bank
+    // 3) Haal de 3 vragen op in de juiste volgorde (volgorde = array volgorde)
     const { data: qRows, error: qErr } = await admin
       .from("bonus_question_bank")
-      .select("id,prompt,scope,answer_kind,is_active")
+      .select("id,prompt,answer_kind,scope")
       .in("id", questionIds);
 
-    dbg(reqId, DBG, "bonus_question_bank", {
-      count: qRows?.length ?? 0,
+    dbg(reqId, DBG, "fetch selected questions", {
+      want: questionIds.length,
+      got: (qRows ?? []).length,
       err: qErr?.message ?? null,
     });
 
     if (qErr) return jsonError(qErr.message, 500);
 
-    const qById = new Map<string, any>();
-    for (const q of qRows ?? []) qById.set(q.id, q);
+    const byId: Record<string, any> = {};
+    for (const r of qRows ?? []) byId[(r as any).id] = r;
 
-    const ordered = questionIds.map((id, idx) => ({
-      position: idx + 1,
-      id,
-      prompt: qById.get(id)?.prompt ?? "(missing prompt)",
-      scope: qById.get(id)?.scope ?? null,
-      answer_kind: qById.get(id)?.answer_kind ?? null,
-      is_active: qById.get(id)?.is_active ?? null,
-    }));
+    const ordered = questionIds
+      .map((id) => byId[id])
+      .filter(Boolean)
+      .map((r: any) => ({
+        id: r.id,
+        prompt: r.prompt,
+        answer_kind: r.answer_kind,
+        scope: r.scope,
+      }));
 
     dbg(reqId, DBG, "done", { returned: ordered.length });
 
@@ -149,7 +209,11 @@ export async function GET(req: Request) {
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (e: any) {
-    console.log(`[WEEKEND_SET][${reqId}] ERROR 500`, e?.message ?? e, e?.stack ?? "");
+    console.log(
+      `[WEEKEND_SET][${reqId}] ERROR 500`,
+      e?.message ?? e,
+      e?.stack ?? ""
+    );
     return jsonError(e?.message ?? "Unknown error", 500);
   }
 }
