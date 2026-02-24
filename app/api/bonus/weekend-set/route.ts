@@ -3,6 +3,8 @@ import { createClient } from "@supabase/supabase-js";
 import { supabaseAdmin } from "../../../../lib/supabaseAdmin";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 function makeReqId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -23,7 +25,10 @@ function dbg(reqId: string, enabled: boolean, label: string, data?: any) {
 }
 
 function jsonError(message: string, status = 400) {
-  return NextResponse.json({ error: message }, { status });
+  return NextResponse.json(
+    { error: message },
+    { status, headers: { "Cache-Control": "no-store" } }
+  );
 }
 
 function getBearerToken(req: Request): string | null {
@@ -41,43 +46,31 @@ async function getUserFromToken(accessToken: string) {
   return data.user;
 }
 
-// Random selectie zonder DB-functies: shuffle in JS
-function pickRandom<T>(arr: T[], n: number): T[] {
-  const copy = [...arr];
-  for (let i = copy.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [copy[i], copy[j]] = [copy[j], copy[i]];
-  }
-  return copy.slice(0, n);
-}
-
 export async function GET(req: Request) {
   const reqId = makeReqId();
   const DBG = isDbgEnabled(req);
 
   try {
     const url = new URL(req.url);
-    const poolId = url.searchParams.get("poolId");
-    const eventId = url.searchParams.get("eventId");
 
-    dbg(reqId, DBG, "start", { poolId, eventId });
+    const poolId = url.searchParams.get("poolId") ?? url.searchParams.get("pool_id");
+    const eventId = url.searchParams.get("eventId") ?? url.searchParams.get("event_id");
+
+    dbg(reqId, DBG, "query", { poolId, eventId });
 
     if (!poolId || !eventId) return jsonError("Missing poolId or eventId", 400);
 
-    const accessToken =
-      getBearerToken(req) || url.searchParams.get("accessToken");
-
+    const accessToken = getBearerToken(req) || url.searchParams.get("accessToken");
     dbg(reqId, DBG, "token present", { hasAccessToken: !!accessToken });
-
     if (!accessToken) return jsonError("Missing accessToken", 401);
 
     const user = await getUserFromToken(accessToken);
-    dbg(reqId, DBG, "user", { ok: !!user, userId: user?.id ?? null });
+    dbg(reqId, DBG, "auth.getUser", { ok: !!user });
     if (!user) return jsonError("Invalid session", 401);
 
     const admin = supabaseAdmin();
 
-    // membership check (pool_members)
+    // membership check
     const { data: mem, error: memErr } = await admin
       .from("pool_members")
       .select("pool_id,user_id")
@@ -86,107 +79,62 @@ export async function GET(req: Request) {
       .maybeSingle();
 
     dbg(reqId, DBG, "membership", { ok: !!mem, err: memErr?.message ?? null });
+
     if (memErr) return jsonError(memErr.message, 500);
     if (!mem) return jsonError("Not a pool member", 403);
 
-    // 1) Bestaat er al een set voor (pool,event)?
-    const { data: existing, error: exErr } = await admin
+    // Fetch set (your current schema uses bonus_weekend_sets)
+    const { data: setRow, error: setErr } = await admin
       .from("bonus_weekend_sets")
-      .select("id,question_ids")
+      .select("id,pool_id,event_id,question_1_id,question_2_id,question_3_id")
       .eq("pool_id", poolId)
       .eq("event_id", eventId)
       .maybeSingle();
 
-    dbg(reqId, DBG, "existing set", {
-      has: !!existing,
-      setId: existing?.id ?? null,
-      qCount: (existing?.question_ids ?? []).length,
-      err: exErr?.message ?? null,
+    dbg(reqId, DBG, "bonus_weekend_sets", {
+      ok: !!setRow,
+      err: setErr?.message ?? null,
+      setId: setRow?.id ?? null,
     });
 
-    if (exErr) return jsonError(exErr.message, 500);
+    if (setErr) return jsonError(setErr.message, 500);
+    if (!setRow) return jsonError("No weekend set found for this pool/event", 404);
 
-    let questionIds: string[] = (existing?.question_ids ?? []) as string[];
+    const questionIds = [
+      setRow.question_1_id,
+      setRow.question_2_id,
+      setRow.question_3_id,
+    ].filter(Boolean) as string[];
 
-    // 2) Geen set? Maak hem aan met exact 3 random actieve weekend questions
     if (questionIds.length !== 3) {
-      const { data: bankRows, error: bankErr } = await admin
-        .from("bonus_question_bank")
-        .select("id,scope,answer_kind,is_active")
-        .eq("is_active", true)
-        .eq("scope", "weekend")
-        .eq("answer_kind", "boolean");
-
-      dbg(reqId, DBG, "question bank fetch", {
-        count: (bankRows ?? []).length,
-        err: bankErr?.message ?? null,
-      });
-
-      if (bankErr) return jsonError(bankErr.message, 500);
-
-      const ids = (bankRows ?? []).map((r: any) => r.id).filter(Boolean);
-
-      if (ids.length < 3) {
-        return jsonError("Not enough active weekend boolean questions in bonus_question_bank", 400);
-      }
-
-      questionIds = pickRandom(ids, 3);
-
-      dbg(reqId, DBG, "picked random qids", { questionIds });
-
-      // Upsert set
-      // IMPORTANT: bonus_weekend_sets moet uniek zijn op (pool_id,event_id)
-      const { data: upSet, error: upErr } = await admin
-        .from("bonus_weekend_sets")
-        .upsert(
-          {
-            pool_id: poolId,
-            event_id: eventId,
-            question_ids: questionIds,
-          },
-          { onConflict: "pool_id,event_id" }
-        )
-        .select("id,question_ids")
-        .maybeSingle();
-
-      dbg(reqId, DBG, "upsert set", {
-        ok: !!upSet,
-        setId: upSet?.id ?? null,
-        qCount: (upSet?.question_ids ?? []).length,
-        err: upErr?.message ?? null,
-      });
-
-      if (upErr) return jsonError(upErr.message, 500);
-
-      questionIds = (upSet?.question_ids ?? questionIds) as string[];
+      dbg(reqId, DBG, "invalid set questionIds", { questionIds });
+      return jsonError("Weekend set does not have exactly 3 questions", 500);
     }
 
-    // 3) Haal de 3 vragen op in de juiste volgorde (volgorde = array volgorde)
+    // Load question prompts from bank
     const { data: qRows, error: qErr } = await admin
       .from("bonus_question_bank")
-      .select("id,prompt,answer_kind,scope")
+      .select("id,prompt,scope,answer_kind,is_active")
       .in("id", questionIds);
 
-    dbg(reqId, DBG, "fetch selected questions", {
-      want: questionIds.length,
-      got: (qRows ?? []).length,
+    dbg(reqId, DBG, "bonus_question_bank", {
+      count: qRows?.length ?? 0,
       err: qErr?.message ?? null,
     });
 
     if (qErr) return jsonError(qErr.message, 500);
 
-    const byId: Record<string, any> = {};
-    for (const r of qRows ?? []) byId[(r as any).id] = r;
+    const qById = new Map<string, any>();
+    for (const q of qRows ?? []) qById.set(q.id, q);
 
-    const ordered = questionIds
-      .map((id) => byId[id])
-      .filter(Boolean)
-      .map((r: any) => ({
-        id: r.id,
-        prompt: r.prompt,
-        answer_kind: r.answer_kind,
-        scope: r.scope,
-      }));
+    const ordered = questionIds.map((id, idx) => ({
+      position: idx + 1,
+      id,
+      prompt: qById.get(id)?.prompt ?? "(missing prompt)",
+      scope: qById.get(id)?.scope ?? null,
+      answer_kind: qById.get(id)?.answer_kind ?? null,
+      is_active: qById.get(id)?.is_active ?? null,
+    }));
 
     dbg(reqId, DBG, "done", { returned: ordered.length });
 
