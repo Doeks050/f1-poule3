@@ -177,11 +177,22 @@ if (!offJson.ok) {
         ? { action: "clear", pool_id: poolId, event_id: eventId, question_id: questionId }
         : { action: "upsert", pool_id: poolId, event_id: eventId, question_id: questionId, answer_json: value };
 
-    const res = await fetch("/api/weekend-official", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+    const { data: sessionData } = await supabase.auth.getSession();
+const accessToken = sessionData?.session?.access_token;
+
+if (!accessToken) {
+  setTopError("Not authenticated (missing token)");
+  return;
+}
+
+const res = await fetch("/api/weekend-official", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${accessToken}`,
+  },
+  body: JSON.stringify(body),
+});
 
     const json = await res.json().catch(() => null);
 
