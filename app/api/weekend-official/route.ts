@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { createClient } from "@supabase/supabase-js";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -14,27 +14,37 @@ function jsonError(message: string, status = 400, extra?: any) {
   return NextResponse.json({ ok: false, error: message, extra }, { status });
 }
 
+function getAdminClient() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!url) throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL");
+  if (!serviceKey) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");
+
+  return createClient(url, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+}
+
 function getTokenFromRequest(req: Request) {
-  // 1) Authorization: Bearer <token>
   const auth = req.headers.get("authorization");
   if (auth?.toLowerCase().startsWith("bearer ")) return auth.slice(7).trim();
 
-  // 2) Cookie fallback (common names)
   const cookie = req.headers.get("cookie") ?? "";
   const parts = cookie.split(";").map((p) => p.trim());
-  const map = new Map(parts.map((p) => {
-    const i = p.indexOf("=");
-    return [p.slice(0, i), decodeURIComponent(p.slice(i + 1))] as const;
-  }));
-
-  return (
-    map.get("sb-access-token") ||
-    map.get("supabase-auth-token") || // sometimes stored as JSON; but keeping fallback
-    null
+  const map = new Map(
+    parts
+      .filter((p) => p.includes("="))
+      .map((p) => {
+        const i = p.indexOf("=");
+        return [p.slice(0, i), decodeURIComponent(p.slice(i + 1))] as const;
+      })
   );
+
+  return map.get("sb-access-token") || null;
 }
 
-async function assertUser(req: Request) {
+async function assertUser(req: Request, supabaseAdmin: ReturnType<typeof getAdminClient>) {
   const token = getTokenFromRequest(req);
   if (!token) return { ok: false as const, error: "Not authenticated (missing token)" };
 
@@ -44,7 +54,11 @@ async function assertUser(req: Request) {
   return { ok: true as const, userId: data.user.id };
 }
 
-async function assertPoolMembership(poolId: string, userId: string) {
+async function assertPoolMembership(
+  supabaseAdmin: ReturnType<typeof getAdminClient>,
+  poolId: string,
+  userId: string
+) {
   const { data, error } = await supabaseAdmin
     .from("pool_members")
     .select("pool_id,user_id,role")
@@ -55,11 +69,17 @@ async function assertPoolMembership(poolId: string, userId: string) {
   if (error) return { ok: false as const, error: error.message };
   if (!data) return { ok: false as const, error: "Not a pool member" };
 
-  return { ok: true as const, role: data.role as string };
+  // optioneel: alleen admins/owners toestaan
+  // if (!["owner", "admin"].includes((data.role ?? "").toString())) return { ok: false as const, error: "Not allowed" };
+
+  return { ok: true as const, role: (data.role as string) ?? "" };
 }
 
-async function ensureWeekendSetId(poolId: string, eventId: string) {
-  // bonus_weekend_sets: id, pool_id, event_id, question_ids (jsonb/array)
+async function ensureWeekendSetId(
+  supabaseAdmin: ReturnType<typeof getAdminClient>,
+  poolId: string,
+  eventId: string
+) {
   const existing = await supabaseAdmin
     .from("bonus_weekend_sets")
     .select("id")
@@ -70,7 +90,6 @@ async function ensureWeekendSetId(poolId: string, eventId: string) {
   if (existing.error) return { ok: false as const, error: existing.error.message };
   if (existing.data?.id) return { ok: true as const, setId: existing.data.id as string };
 
-  // If set does not exist yet, create an empty one (questions are managed by /api/bonus/weekend-set anyway)
   const created = await supabaseAdmin
     .from("bonus_weekend_sets")
     .insert({ pool_id: poolId, event_id: eventId, question_ids: [] })
@@ -81,34 +100,35 @@ async function ensureWeekendSetId(poolId: string, eventId: string) {
   return { ok: true as const, setId: created.data.id as string };
 }
 
-async function pickOfficialTable() {
-  // prefer non-v2; fallback to v2 if non-v2 doesn't exist
-  const try1 = await supabaseAdmin.from("weekend_bonus_official_answers").select("id").limit(1);
-  if (!try1.error) return "weekend_bonus_official_answers";
+async function pickOfficialTable(supabaseAdmin: ReturnType<typeof getAdminClient>) {
+  const t1 = await supabaseAdmin.from("weekend_bonus_official_answers").select("question_id").limit(1);
+  if (!t1.error) return "weekend_bonus_official_answers";
 
-  const try2 = await supabaseAdmin.from("weekend_bonus_official_answers_v2").select("id").limit(1);
-  if (!try2.error) return "weekend_bonus_official_answers_v2";
+  const t2 = await supabaseAdmin.from("weekend_bonus_official_answers_v2").select("question_id").limit(1);
+  if (!t2.error) return "weekend_bonus_official_answers_v2";
 
   return null;
 }
 
 export async function GET(req: Request) {
   try {
+    const supabaseAdmin = getAdminClient();
+
     const u = new URL(req.url);
     const poolId = u.searchParams.get("poolId") ?? "";
     const eventId = u.searchParams.get("eventId") ?? "";
     if (!poolId || !eventId) return jsonError("Missing poolId or eventId", 400);
 
-    const auth = await assertUser(req);
+    const auth = await assertUser(req, supabaseAdmin);
     if (!auth.ok) return jsonError(auth.error, 401);
 
-    const mem = await assertPoolMembership(poolId, auth.userId);
+    const mem = await assertPoolMembership(supabaseAdmin, poolId, auth.userId);
     if (!mem.ok) return jsonError(mem.error, 403);
 
-    const setRes = await ensureWeekendSetId(poolId, eventId);
+    const setRes = await ensureWeekendSetId(supabaseAdmin, poolId, eventId);
     if (!setRes.ok) return jsonError(setRes.error, 500);
 
-    const table = await pickOfficialTable();
+    const table = await pickOfficialTable(supabaseAdmin);
     if (!table) return jsonError("No official answers table found (weekend_bonus_official_answers[_v2])", 500);
 
     const { data, error } = await supabaseAdmin
@@ -131,6 +151,8 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
+    const supabaseAdmin = getAdminClient();
+
     const body = await req.json().catch(() => null);
     if (!body) return jsonError("Invalid JSON body", 400);
 
@@ -144,16 +166,16 @@ export async function POST(req: Request) {
       return jsonError("Missing pool_id/event_id/question_id", 400, { poolId, eventId, questionId });
     }
 
-    const auth = await assertUser(req);
+    const auth = await assertUser(req, supabaseAdmin);
     if (!auth.ok) return jsonError(auth.error, 401);
 
-    const mem = await assertPoolMembership(poolId, auth.userId);
+    const mem = await assertPoolMembership(supabaseAdmin, poolId, auth.userId);
     if (!mem.ok) return jsonError(mem.error, 403);
 
-    const setRes = await ensureWeekendSetId(poolId, eventId);
+    const setRes = await ensureWeekendSetId(supabaseAdmin, poolId, eventId);
     if (!setRes.ok) return jsonError(setRes.error, 500);
 
-    const table = await pickOfficialTable();
+    const table = await pickOfficialTable(supabaseAdmin);
     if (!table) return jsonError("No official answers table found (weekend_bonus_official_answers[_v2])", 500);
 
     if (action === "clear") {
@@ -168,7 +190,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, table, setId: setRes.setId, deleted: true });
     }
 
-    // IMPORTANT: we do NOT allow null answer_json insert because your column is NOT NULL in some tables.
     if (answerJson === null || typeof answerJson === "undefined") {
       return jsonError("answer_json is required for upsert (use action=clear to remove)", 400);
     }
