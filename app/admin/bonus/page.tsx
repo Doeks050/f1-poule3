@@ -177,7 +177,7 @@ if (!offJson.ok) {
         ? { action: "clear", pool_id: poolId, event_id: eventId, question_id: questionId }
         : { action: "upsert", pool_id: poolId, event_id: eventId, question_id: questionId, answer_json: value };
 
-    const res = await fetch("/api/bonus/weekend-official", {
+    const res = await fetch("/api/weekend-official", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
