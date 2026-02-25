@@ -34,6 +34,24 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
 
+async function authedFetch(url: string) {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  const headers: Record<string, string> = {};
+
+  if (session?.access_token) {
+    headers["Authorization"] = `Bearer ${session.access_token}`;
+  }
+
+  return fetch(url, {
+    method: "GET",
+    headers,
+    cache: "no-store",
+  });
+}
+
 function formatDate(s?: string | null) {
   if (!s) return "";
   try {
@@ -104,9 +122,9 @@ export default function AdminBonusPage() {
       setLoading(true);
       try {
         // 1) weekend set (questions)
-        const setRes = await fetch(`/api/bonus/weekend-set?poolId=${poolId}&eventId=${eventId}`, {
-          cache: "no-store",
-        });
+        const setRes = await authedFetch(
+  `/api/bonus/weekend-set?poolId=${poolId}&eventId=${eventId}`
+);
         const setJson = (await setRes.json()) as WeekendSetResponse;
 
         if (!setRes.ok || !setJson.ok) {
@@ -119,9 +137,9 @@ export default function AdminBonusPage() {
         setWeekendSetId(setJson.setId ?? "");
 
         // 2) official answers
-        const offRes = await fetch(`/api/bonus/weekend-official?poolId=${poolId}&eventId=${eventId}`, {
-          cache: "no-store",
-        });
+        const offRes = await authedFetch(
+  `/api/bonus/weekend-official?poolId=${poolId}&eventId=${eventId}`
+);
         const offJson = (await offRes.json()) as WeekendOfficialResponse;
 
         if (!offRes.ok || !offJson.ok) {
