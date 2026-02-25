@@ -324,7 +324,7 @@ const res = await fetch("/api/weekend-official", {
                             cursor: "pointer",
                           }}
                         >
-                          Open / wis
+                          wis
                         </button>
                       </div>
                     ) : (
