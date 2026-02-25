@@ -138,15 +138,24 @@ export default function AdminBonusPage() {
 
         // 2) official answers
         const offRes = await authedFetch(
-  `/api/bonus/weekend-official?poolId=${poolId}&eventId=${eventId}`
+  `/api/weekend-official?poolId=${poolId}&eventId=${eventId}`
 );
-        const offJson = (await offRes.json()) as WeekendOfficialResponse;
 
-        if (!offRes.ok || !offJson.ok) {
-          setTopError(offJson.error || "Failed to load official answers");
-          setLoading(false);
-          return;
-        }
+if (!offRes.ok) {
+  const text = await offRes.text();
+  console.error("Official fetch failed:", text);
+  setTopError("Failed to load official answers");
+  setLoading(false);
+  return;
+}
+
+const offJson = (await offRes.json()) as WeekendOfficialResponse;
+
+if (!offJson.ok) {
+  setTopError(offJson.error || "Failed to load official answers");
+  setLoading(false);
+  return;
+}
 
         const m: Record<string, any> = {};
         for (const r of offJson.rows ?? []) m[r.question_id] = r.answer_json;
