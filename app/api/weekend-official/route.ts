@@ -194,18 +194,22 @@ export async function POST(req: Request) {
       return jsonError("answer_json is required for upsert (use action=clear to remove)", 400);
     }
 
-    const up = await supabaseAdmin
-      .from(table)
-      .upsert(
-        {
-          set_id: setRes.setId,
-          question_id: questionId,
-          answer_json: answerJson,
-        },
-        { onConflict: "set_id,question_id" }
-      )
-      .select("question_id,answer_json,set_id")
-      .single();
+    const row = {
+  pool_id: poolId,
+  event_id: eventId,
+  question_id: questionId,
+  answer_json: answerJson,
+  decided_by: auth.userId,
+  decided_at: new Date().toISOString(),
+  // set_id mag bestaan maar is bij jou optional (nullable), dus alleen zetten als je 'm hebt:
+  set_id: setRes?.setId ?? null,
+};
+
+const up = await supabaseAdmin
+  .from(table)
+  .upsert(row, { onConflict: "pool_id,event_id,question_id" })
+  .select("pool_id,event_id,question_id,answer_json,set_id,decided_by,decided_at")
+  .single();
 
     if (up.error) return jsonError(up.error.message, 500, { table });
 
