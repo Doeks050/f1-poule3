@@ -4,8 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { createClient } from "@supabase/supabase-js";
 
-type PoolRow = { id: string; name?: string | null; title?: string | null; pool_name?: string | null };
-type EventRow = { id: string; name?: string | null; title?: string | null; starts_at?: string | null };
+type PoolRow = { id: string; name?: string | null; pool_name?: string | null };
+type EventRow = { id: string; name?: string | null; starts_at?: string | null };
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseAnonKey =
@@ -13,10 +13,10 @@ const supabaseAnonKey =
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 function poolLabel(p: PoolRow) {
-  return p.name ?? p.title ?? p.pool_name ?? p.id;
+  return p.name ?? p.pool_name ?? p.id;
 }
 function eventLabel(e: EventRow) {
-  return e.name ?? e.title ?? e.id;
+  return e.name ?? e.id;
 }
 
 export default function AdminBonusPage() {
@@ -78,40 +78,41 @@ export default function AdminBonusPage() {
         const poolIds = (memberRows ?? []).map((r: any) => r.pool_id).filter(Boolean);
 
         if (poolIds.length === 0) {
-          // fallback: probeer pools direct (kan bij admin / owner setups)
+          // fallback: probeer pools direct (admin setups)
           const { data: pFallback, error: pFallbackErr } = await supabase
             .from("pools")
-            .select("id,name,title,pool_name")
+            .select("id,name,pool_name")
             .limit(200);
 
           if (pFallbackErr) throw new Error(`pools fallback select error: ${pFallbackErr.message}`);
 
-          setPools((pFallback as any) ?? []);
-          if ((pFallback as any)?.[0]?.id) setSelectedPoolId((pFallback as any)[0].id);
+          const list = ((pFallback as any) ?? []) as PoolRow[];
+          setPools(list);
+          if (list[0]?.id) setSelectedPoolId(list[0].id);
         } else {
           const { data: poolRows, error: pErr } = await supabase
             .from("pools")
-            .select("id,name,title,pool_name")
+            .select("id,name,pool_name")
             .in("id", poolIds)
             .limit(200);
 
           if (pErr) throw new Error(`pools select error: ${pErr.message}`);
 
-          const pList = (poolRows as any) ?? [];
-          setPools(pList);
-          if (pList[0]?.id) setSelectedPoolId(pList[0].id);
+          const list = ((poolRows as any) ?? []) as PoolRow[];
+          setPools(list);
+          if (list[0]?.id) setSelectedPoolId(list[0].id);
         }
 
         // Events
         const { data: evRows, error: evErr } = await supabase
           .from("events")
-          .select("id,name,title,starts_at")
+          .select("id,name,starts_at")
           .order("starts_at", { ascending: false })
           .limit(200);
 
         if (evErr) throw new Error(`events select error: ${evErr.message}`);
 
-        setEvents((evRows as any) ?? []);
+        setEvents(((evRows as any) ?? []) as EventRow[]);
       } catch (e: any) {
         setInitError(e?.message ?? String(e));
       } finally {
@@ -122,7 +123,6 @@ export default function AdminBonusPage() {
 
   // ------------------------------------------------------------
   // WEEKEND: load questions + existing official answers
-  // We houden 1 systeem: via je bestaande API routes
   // ------------------------------------------------------------
   useEffect(() => {
     if (!canLoadWeekend) {
@@ -137,7 +137,7 @@ export default function AdminBonusPage() {
       setWeekendError("");
 
       try {
-        // 1) Weekend set vragen (3)
+        // 1) Weekend set vragen
         const qsRes = await fetch(`/api/bonus/weekend-set?poolId=${selectedPoolId}&eventId=${selectedEventId}`, {
           cache: "no-store",
         });
@@ -148,7 +148,6 @@ export default function AdminBonusPage() {
         setWeekendQuestions(questions);
 
         // 2) Official answers ophalen
-        // Let op: dit endpoint moet bestaan in jouw repo. (Als je het nog niet had: no worries, zeg het, dan fixen we die route.)
         const aRes = await fetch(`/api/bonus/weekend-official?poolId=${selectedPoolId}&eventId=${selectedEventId}`, {
           cache: "no-store",
         });
@@ -172,7 +171,7 @@ export default function AdminBonusPage() {
   async function setWeekendOfficial(questionId: string, value: boolean | null) {
     if (!selectedPoolId || !selectedEventId) return;
 
-    // NIET null upserten -> dat gaf je NOT NULL errors (answer_json)
+    // NIET null upserten -> NOT NULL errors (answer_json)
     const body =
       value === null
         ? { action: "clear", pool_id: selectedPoolId, event_id: selectedEventId, question_id: questionId }
@@ -202,8 +201,7 @@ export default function AdminBonusPage() {
   }
 
   // ------------------------------------------------------------
-  // SEASON: 1 systeem (zelfde bank), via Supabase direct
-  // Als je season nog niet nodig hebt, kan dit later — maar dit breekt niets.
+  // SEASON: vragen uit bank + antwoorden in season_bonus_answers
   // ------------------------------------------------------------
   useEffect(() => {
     if (!canLoadSeason) {
@@ -218,7 +216,6 @@ export default function AdminBonusPage() {
       setSeasonError("");
 
       try {
-        // Actieve season vragen uit bank
         const { data: qRows, error: qErr } = await supabase
           .from("bonus_question_bank")
           .select("id,prompt,scope,is_active,answer_kind")
@@ -232,7 +229,6 @@ export default function AdminBonusPage() {
         setSeasonQuestions(qList);
 
         const qIds = qList.map((q) => q.id);
-
         if (qIds.length === 0) {
           setSeasonOfficialAnswers({});
           setSeasonLoading(false);
