@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "../../../lib/supabaseClient";
 
 function cleanName(v: string) {
@@ -10,6 +10,14 @@ function cleanName(v: string) {
 
 export default function UsernameOnboardingPage() {
   const router = useRouter();
+  const sp = useSearchParams();
+
+  const next = useMemo(() => {
+    const n = sp.get("next");
+    // basic safety: only allow internal paths
+    if (!n || !n.startsWith("/")) return "/pools";
+    return n;
+  }, [sp]);
 
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState<string | null>(null);
@@ -35,7 +43,7 @@ export default function UsernameOnboardingPage() {
       }
       setUserId(data.user.id);
 
-      // Bestaat er al een profile/display_name? Dan direct door.
+      // Bestaat er al een profile/display_name? Dan direct door naar next.
       const { data: prof, error: profErr } = await supabase
         .from("profiles")
         .select("id, display_name")
@@ -43,13 +51,13 @@ export default function UsernameOnboardingPage() {
         .maybeSingle();
 
       if (!profErr && prof?.display_name && String(prof.display_name).trim().length > 0) {
-        router.replace("/pools");
+        router.replace(next);
         return;
       }
 
       setLoading(false);
     })();
-  }, [router]);
+  }, [router, next]);
 
   async function save() {
     setMsg(null);
@@ -71,7 +79,6 @@ export default function UsernameOnboardingPage() {
 
     setSaving(true);
 
-    // profiles(id=auth.uid)
     const { error } = await supabase
       .from("profiles")
       .upsert({ id: userId, display_name: dn }, { onConflict: "id" });
@@ -83,7 +90,7 @@ export default function UsernameOnboardingPage() {
       return;
     }
 
-    router.replace("/pools");
+    router.replace(next);
   }
 
   if (loading) {
@@ -110,14 +117,25 @@ export default function UsernameOnboardingPage() {
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="Bijv. Nix"
-          style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: "1px solid #ccc" }}
+          style={{
+            width: "100%",
+            padding: "10px 12px",
+            borderRadius: 10,
+            border: "1px solid #ccc",
+          }}
         />
       </div>
 
       <button
         onClick={save}
         disabled={saving}
-        style={{ marginTop: 12, padding: "10px 14px", borderRadius: 10, border: "1px solid #111", fontWeight: 800 }}
+        style={{
+          marginTop: 12,
+          padding: "10px 14px",
+          borderRadius: 10,
+          border: "1px solid #111",
+          fontWeight: 800,
+        }}
       >
         {saving ? "Opslaan…" : "Doorgaan →"}
       </button>
